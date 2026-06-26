@@ -1,0 +1,5 @@
+.venv/
+__pycache__/
+*.py[cod]
+storage/
+config/payroll_data.json
