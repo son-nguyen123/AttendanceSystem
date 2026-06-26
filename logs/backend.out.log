@@ -1,0 +1,10 @@
+INFO:     127.0.0.1:49341 - "GET /docs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64014 - "GET /api/history/periods HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51703 - "GET /api/history/periods HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62363 - "GET /docs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57541 - "GET /docs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55309 - "GET /api/history/periods HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52517 - "GET /api/history/periods HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52517 - "GET /api/history/latest-period HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52517 - "POST /api/attendance/analyze HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52517 - "GET /api/payroll/employees?session_id=bc3fb47faaf64596a89debb36d48e736 HTTP/1.1" 200 OK

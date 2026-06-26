@@ -3,8 +3,11 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $BackendDir = Join-Path $Root "backend"
 $FrontendDir = Join-Path $Root "frontend"
+$RuntimeDir = Join-Path $Root "runtime"
 $LogDir = Join-Path $Root "logs"
-$PythonExe = Join-Path $BackendDir ".venv\Scripts\python.exe"
+$PortablePythonExe = Join-Path $RuntimeDir "python\python.exe"
+$VenvPythonExe = Join-Path $BackendDir ".venv\Scripts\python.exe"
+$PythonExe = if (Test-Path $PortablePythonExe) { $PortablePythonExe } else { $VenvPythonExe }
 $FrontendOut = Join-Path $LogDir "frontend.out.log"
 $FrontendErr = Join-Path $LogDir "frontend.err.log"
 $BackendOut = Join-Path $LogDir "backend.out.log"
@@ -40,11 +43,11 @@ function Wait-HttpOk {
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 if (-not (Test-Path $PythonExe)) {
-    throw "Khong tim thay Python venv: $PythonExe"
+    throw "Khong tim thay Python. Hay chay setup.bat truoc, hoac kiem tra backend\.venv."
 }
 
 if (-not (Test-Path (Join-Path $FrontendDir "node_modules"))) {
-    throw "Khong tim thay frontend\node_modules. Hay chay npm install trong thu muc frontend truoc."
+    throw "Khong tim thay frontend\node_modules. Hay chay setup.bat truoc."
 }
 
 if (-not (Test-PortListening 8000)) {
@@ -59,9 +62,9 @@ if (-not (Test-PortListening 8000)) {
 
 if (-not (Test-PortListening 5173)) {
     Start-Process `
-        -FilePath "npm.cmd" `
-        -ArgumentList @("run", "dev", "--", "--host", "127.0.0.1", "--port", "5173") `
-        -WorkingDirectory $FrontendDir `
+        -FilePath "powershell.exe" `
+        -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "run-frontend.ps1")) `
+        -WorkingDirectory $Root `
         -RedirectStandardOutput $FrontendOut `
         -RedirectStandardError $FrontendErr `
         -WindowStyle Hidden
