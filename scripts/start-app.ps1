@@ -13,11 +13,22 @@ $FrontendErr = Join-Path $LogDir "frontend.err.log"
 $BackendOut = Join-Path $LogDir "backend.out.log"
 $BackendErr = Join-Path $LogDir "backend.err.log"
 $AppUrl = "http://127.0.0.1:5173/"
-$ApiUrl = "http://127.0.0.1:8000/docs"
+$ApiUrl = "http://127.0.0.1:8000/health"
 
 function Test-PortListening {
     param([int]$Port)
     return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+}
+
+function Test-HttpOk {
+    param([string]$Url)
+
+    try {
+        $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 3
+        return ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300)
+    } catch {
+        return $false
+    }
 }
 
 function Wait-HttpOk {
@@ -30,7 +41,7 @@ function Wait-HttpOk {
     while ((Get-Date) -lt $deadline) {
         try {
             $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 3
-            if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500) {
+            if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
                 return $true
             }
         } catch {
@@ -38,6 +49,29 @@ function Wait-HttpOk {
         }
     }
     return $false
+}
+
+function Stop-PortProcess {
+    param([int]$Port)
+
+    $connections = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    foreach ($connection in $connections) {
+        $process = Get-Process -Id $connection.OwningProcess -ErrorAction SilentlyContinue
+        if ($process) {
+            Write-Host "Stopping unexpected process on port ${Port}: $($process.ProcessName) ($($process.Id))"
+            Stop-Process -Id $process.Id -Force
+        }
+    }
+}
+
+function Start-Backend {
+    Start-Process `
+        -FilePath $PythonExe `
+        -ArgumentList @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000") `
+        -WorkingDirectory $BackendDir `
+        -RedirectStandardOutput $BackendOut `
+        -RedirectStandardError $BackendErr `
+        -WindowStyle Hidden
 }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -50,14 +84,14 @@ if (-not (Test-Path (Join-Path $FrontendDir "node_modules"))) {
     throw "Khong tim thay frontend\node_modules. Hay chay setup.bat truoc."
 }
 
-if (-not (Test-PortListening 8000)) {
-    Start-Process `
-        -FilePath $PythonExe `
-        -ArgumentList @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000") `
-        -WorkingDirectory $BackendDir `
-        -RedirectStandardOutput $BackendOut `
-        -RedirectStandardError $BackendErr `
-        -WindowStyle Hidden
+if (Test-PortListening 8000) {
+    if (-not (Test-HttpOk -Url $ApiUrl)) {
+        Stop-PortProcess -Port 8000
+        Start-Sleep -Milliseconds 500
+        Start-Backend
+    }
+} else {
+    Start-Backend
 }
 
 if (-not (Test-PortListening 5173)) {

@@ -19,7 +19,7 @@ def detect_employee_blocks(ws: Worksheet) -> list[EmployeeBlock]:
 
         code_label = str(ws.cell(row=employee_row, column=1).value or "").strip()
         employee_code = str(ws.cell(row=employee_row, column=3).value or "").strip()
-        if code_label != "Mã:" or not employee_code:
+        if code_label not in {"Mã:", "MÃ£:"} or not employee_code:
             continue
 
         blocks.append(

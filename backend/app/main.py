@@ -2,6 +2,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes_attendance import router as attendance_router
+from app.api.routes_auth import router as auth_router
+from app.api.routes_bank import router as bank_router
+from app.api.routes_cloud import router as cloud_router
 from app.api.routes_history import router as history_router
 from app.api.routes_payroll import router as payroll_router
 from app.services.history_store import init_history_db
@@ -15,9 +18,13 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Mapping-Summary"],
 )
 
 app.include_router(attendance_router, prefix="/api")
+app.include_router(auth_router, prefix="/api")
+app.include_router(bank_router, prefix="/api")
+app.include_router(cloud_router, prefix="/api")
 app.include_router(payroll_router, prefix="/api")
 app.include_router(history_router, prefix="/api")
 

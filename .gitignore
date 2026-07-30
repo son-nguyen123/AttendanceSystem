@@ -1,0 +1,33 @@
+# Local runtimes and installed dependencies
+runtime/
+backend/.venv/
+frontend/node_modules/
+frontend/dist/
+
+# Local attendance, payroll and cloud data
+backend/storage/
+storage/
+backend/config/payroll_data.json
+
+# Temporary and generated files
+tmp/
+logs/
+*.log
+*.xlsx
+*.xls
+*.xlsm
+*.docx
+*.pdf
+*.png
+*.zip
+
+# Python / tooling caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Local secrets and environment files
+.env
+.env.*
+!.env.example
