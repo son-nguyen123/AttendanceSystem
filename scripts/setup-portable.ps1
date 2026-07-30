@@ -64,8 +64,14 @@ function Test-PythonRuntime {
         return $false
     }
 
-    & $pythonExe --version *> $null
-    return $LASTEXITCODE -eq 0
+    $previousErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $pythonExe --version *> $null
+        return $LASTEXITCODE -eq 0
+    } finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
 }
 
 function Test-NodeRuntime {
@@ -77,12 +83,18 @@ function Test-NodeRuntime {
         return $false
     }
 
-    & $nodeExe --version *> $null
-    if ($LASTEXITCODE -ne 0) {
-        return $false
+    $previousErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $nodeExe --version *> $null
+        if ($LASTEXITCODE -ne 0) {
+            return $false
+        }
+        & $npmCmd --version *> $null
+        return $LASTEXITCODE -eq 0
+    } finally {
+        $ErrorActionPreference = $previousErrorAction
     }
-    & $npmCmd --version *> $null
-    return $LASTEXITCODE -eq 0
 }
 
 function Enable-PythonSitePackages {
@@ -112,13 +124,19 @@ function Enable-PythonSitePackages {
 function Test-BackendRequirementsInstalled {
     param([string]$PythonExe)
 
-    & $PythonExe -c "import fastapi, uvicorn, openpyxl, pandas, PIL, pydantic, xlrd, multipart, numpy" *> $null
-    if ($LASTEXITCODE -ne 0) {
-        return $false
-    }
+    $previousErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $PythonExe -c "import fastapi, uvicorn, openpyxl, pandas, PIL, pydantic, xlrd, multipart, numpy" *> $null
+        if ($LASTEXITCODE -ne 0) {
+            return $false
+        }
 
-    & $PythonExe -m pip check *> $null
-    return $LASTEXITCODE -eq 0
+        & $PythonExe -m pip check *> $null
+        return $LASTEXITCODE -eq 0
+    } finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
 }
 
 function Test-FrontendDependenciesInstalled {
@@ -131,11 +149,14 @@ function Test-FrontendDependenciesInstalled {
         return $false
     }
 
+    $previousErrorAction = $ErrorActionPreference
     Push-Location $FrontendDir
     try {
+        $ErrorActionPreference = "Continue"
         & $NpmCmd ls --depth=0 --silent *> $null
         return $LASTEXITCODE -eq 0
     } finally {
+        $ErrorActionPreference = $previousErrorAction
         Pop-Location
     }
 }
@@ -156,8 +177,12 @@ if (-not (Test-Path $PythonExe)) {
     throw "Khong tim thay python.exe trong $PythonDir"
 }
 
+$previousErrorAction = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 & $PythonExe -m pip --version *> $null
-if ($LASTEXITCODE -ne 0) {
+$pipAvailable = $LASTEXITCODE -eq 0
+$ErrorActionPreference = $previousErrorAction
+if (-not $pipAvailable) {
     Download-IfMissing -Url $GetPipUrl -Path $GetPip
     & $PythonExe $GetPip --no-warn-script-location
     if ($LASTEXITCODE -ne 0) {
