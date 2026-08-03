@@ -1,11 +1,14 @@
 import json
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 
 
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
 PAYROLL_DATA_PATH = CONFIG_DIR / "payroll_data.json"
+PAYROLL_PROFILE_SOURCES_PATH = CONFIG_DIR / "payroll_profile_sources.json"
 STANDARD_WORK_DAYS = 26
 
 
@@ -90,14 +93,32 @@ def merge_missing_payroll_entries(defaults_by_code: dict[str, dict]) -> None:
         save_payroll_data(data)
 
 
-def merge_payroll_profile_updates(updates_by_code: dict[str, dict]) -> dict:
+def merge_payroll_profile_updates(
+    updates_by_code: dict[str, dict],
+    *,
+    source_month: int | None = None,
+    source_year: int | None = None,
+    source_kind: str = "workbook",
+    source_name: str = "",
+) -> dict:
     if not updates_by_code:
-        return {"updated_count": 0, "skipped_count": 0, "updated_codes": [], "skipped_codes": []}
+        return {
+            "updated_count": 0,
+            "skipped_count": 0,
+            "updated_codes": [],
+            "skipped_codes": [],
+            "conflict_count": 0,
+            "conflict_codes": [],
+        }
 
     data = load_payroll_data()
+    sources = _load_profile_sources()
     updated_codes: list[str] = []
     skipped_codes: list[str] = []
-    stable_fields = {"name", "start_work_note", "monthly_salary", "daily_salary", "hourly_salary"}
+    conflict_codes: list[str] = []
+    sources_changed = False
+    profile_fields = {"name", "start_work_note", "monthly_salary", "daily_salary", "hourly_salary"}
+    incoming_source = _profile_source(source_month, source_year, source_kind, source_name)
 
     for raw_code, raw_updates in updates_by_code.items():
         code = normalize_employee_code(raw_code)
@@ -110,8 +131,10 @@ def merge_payroll_profile_updates(updates_by_code: dict[str, dict]) -> dict:
             existing = {}
 
         next_entry = PayrollEntry(**existing).model_dump()
+        existing_sources = sources.get(code, {}) if isinstance(sources.get(code), dict) else {}
         changed = False
-        for field in stable_fields:
+        blocked = False
+        for field in profile_fields:
             value = raw_updates.get(field)
             if value in (None, ""):
                 continue
@@ -119,25 +142,105 @@ def merge_payroll_profile_updates(updates_by_code: dict[str, dict]) -> dict:
                 value = _number_or_none(value)
                 if value is None:
                     continue
+            previous_source = existing_sources.get(field)
+            if _source_is_older(incoming_source, previous_source):
+                blocked = True
+                continue
             if next_entry.get(field) != value:
                 next_entry[field] = value
                 changed = True
+            if existing_sources.get(field) != incoming_source:
+                sources_changed = True
+            existing_sources[field] = incoming_source
 
         if changed:
             data[code] = normalize_payroll_entry(PayrollEntry(**next_entry)).model_dump()
+            sources[code] = existing_sources
             updated_codes.append(code)
         else:
             skipped_codes.append(code)
+            if blocked:
+                conflict_codes.append(code)
 
     if updated_codes:
         save_payroll_data(data)
+    if sources_changed:
+        _save_profile_sources(sources)
 
     return {
         "updated_count": len(updated_codes),
         "skipped_count": len(skipped_codes),
         "updated_codes": updated_codes,
         "skipped_codes": skipped_codes,
+        "conflict_count": len(conflict_codes),
+        "conflict_codes": conflict_codes,
     }
+
+
+def _load_profile_sources() -> dict[str, dict[str, dict[str, Any]]]:
+    if not PAYROLL_PROFILE_SOURCES_PATH.exists():
+        return {}
+    try:
+        with PAYROLL_PROFILE_SOURCES_PATH.open("r", encoding="utf-8") as file:
+            raw = json.load(file)
+        return raw if isinstance(raw, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_profile_sources(sources: dict[str, dict[str, dict[str, Any]]]) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with PAYROLL_PROFILE_SOURCES_PATH.open("w", encoding="utf-8") as file:
+        json.dump(sources, file, ensure_ascii=False, indent=2)
+
+
+def _profile_source(
+    month: int | None,
+    year: int | None,
+    source_kind: str,
+    source_name: str,
+) -> dict[str, Any]:
+    return {
+        "month": int(month) if month else None,
+        "year": int(year) if year else None,
+        "kind": source_kind or "workbook",
+        "name": source_name or "",
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def _source_is_older(incoming: dict[str, Any], previous: object) -> bool:
+    if not isinstance(previous, dict):
+        return False
+    incoming_period = _period_key(incoming)
+    previous_period = _period_key(previous)
+    if incoming_period is None or previous_period is None:
+        return False
+    if incoming_period < previous_period:
+        return True
+    if incoming_period > previous_period:
+        return False
+    return _source_kind_rank(incoming.get("kind")) < _source_kind_rank(previous.get("kind"))
+
+
+def _source_kind_rank(kind: object) -> int:
+    return {
+        "final_copy": 3,
+        "history_output2": 2,
+        "analysis_copy": 1,
+        "workbook": 0,
+    }.get(str(kind or ""), 0)
+
+
+def _period_key(source: dict[str, Any]) -> tuple[int, int] | None:
+    try:
+        year = int(source.get("year") or 0)
+        month = int(source.get("month") or 0)
+    except (TypeError, ValueError):
+        return None
+    if year < 2000 or month < 1 or month > 12:
+        return None
+    return year, month
 
 
 def _entry_to_employee(employee_code: str, entry: PayrollEntry) -> dict:

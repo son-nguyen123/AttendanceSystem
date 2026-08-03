@@ -7,7 +7,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from app.services.block_detector import detect_employee_blocks
-from app.services.payroll_store import calculate_daily_salary, calculate_hourly_salary, calculate_monthly_salary, get_payroll_entry
+from app.services.payroll_store import PayrollEntry, calculate_daily_salary, calculate_hourly_salary, calculate_monthly_salary, get_payroll_entry
 from app.services.workbook_processor import _format_attendance_time_row, _format_title_area, export_processed_workbook
 
 
@@ -24,7 +24,11 @@ RED = "C00000"
 FONT_NAME = "Arial"
 
 
-def preview_payroll(source_path: Path, review_overrides: list[dict] | None = None) -> dict:
+def preview_payroll(
+    source_path: Path,
+    review_overrides: list[dict] | None = None,
+    profile_codes: set[str] | None = None,
+) -> dict:
     with NamedTemporaryFile(suffix=".xlsx", delete=False) as temp_file:
         temp_path = Path(temp_file.name)
 
@@ -33,7 +37,7 @@ def preview_payroll(source_path: Path, review_overrides: list[dict] | None = Non
         wb = load_workbook(temp_path, data_only=False)
         ws = _select_attendance_sheet(wb)
         blocks = detect_employee_blocks(ws)
-        employees = [_build_employee_preview(ws, block) for block in blocks]
+        employees = [_build_employee_preview(ws, block, profile_codes=profile_codes) for block in blocks]
         return {"sheet_name": ws.title, "employees": employees}
     finally:
         temp_path.unlink(missing_ok=True)
@@ -44,6 +48,7 @@ def export_payroll_workbook(
     output_path: Path,
     review_overrides: list[dict] | None = None,
     include_saved_data: bool = True,
+    profile_codes: set[str] | None = None,
 ) -> Path:
     with NamedTemporaryFile(suffix=".xlsx", delete=False) as temp_file:
         temp_output1 = Path(temp_file.name)
@@ -56,7 +61,12 @@ def export_payroll_workbook(
 
         for block in blocks:
             _format_attendance_time_row(ws, block)
-            preview = _build_employee_preview(ws, block, include_saved_data=include_saved_data)
+            preview = _build_employee_preview(
+                ws,
+                block,
+                include_saved_data=include_saved_data,
+                profile_codes=profile_codes,
+            )
             _write_payroll_block(ws, block, preview)
 
         _write_monthly_grand_total(ws, blocks)
@@ -133,8 +143,15 @@ def _select_attendance_sheet(wb):
     return best_sheet
 
 
-def _build_employee_preview(ws, block, include_saved_data: bool = True) -> dict:
+def _build_employee_preview(
+    ws,
+    block,
+    include_saved_data: bool = True,
+    profile_codes: set[str] | None = None,
+) -> dict:
     entry = get_payroll_entry(block.employee_code)
+    if profile_codes is not None and block.employee_code not in profile_codes:
+        entry = PayrollEntry()
     total_hours = _sum_work_hours(ws, block.result_row)
     monthly_salary = calculate_monthly_salary(entry) if include_saved_data else None
     daily_salary = calculate_daily_salary(entry) if include_saved_data else 0

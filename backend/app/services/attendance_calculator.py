@@ -25,8 +25,10 @@ NOON_OUT_END = 12 * 60 + 10
 DUPLICATE_PUNCH_WINDOW = 5
 MID_SHIFT_GAP_MINUTES = 15
 LATE_DETECTION_WINDOW = 120
-AFTERNOON_EXTRA_END_NORMAL = 17 * 60 + 32
-AFTERNOON_EXTRA_SUSPICIOUS_START = 17 * 60 + 33
+AFTERNOON_EXTRA_END_NORMAL = 17 * 60 + 39
+AFTERNOON_EXTRA_SUSPICIOUS_START = 17 * 60 + 40
+AFTERNOON_CHECKOUT_CLUSTER_START = 16 * 60 + 55
+AFTERNOON_CHECKOUT_CLUSTER_END = 17 * 60 + 39
 EVENING_RESTART_MIN = 17 * 60 + 40
 EVENING_RESTART_MAX = 18 * 60 + 15
 EVENING_OUT_MIN = 21 * 60 + 30
@@ -58,6 +60,11 @@ def calculate_day(punches: list[str]) -> CalculationResult:
         return CalculationResult(None, None, None, [])
 
     times = sorted({time_to_minutes(punch) for punch in punches})
+    # Two distinct marks around the end of the afternoon, followed by a clear
+    # evening checkout, mean "afternoon checkout + evening restart".  Preserve
+    # that pair before applying the broader habitual-punch cluster rule.
+    if _clear_afternoon_evening_restart_pair(times) is None:
+        times = _normalize_end_of_afternoon_cluster(times)
     manual_checks: list[str] = []
     original_missing_count = _detect_missing_count(times)
     missing_count = original_missing_count
@@ -114,8 +121,15 @@ def calculate_day(punches: list[str]) -> CalculationResult:
         manual_checks.append("Có dấu hiệu bấm giờ sát ca tối khi chưa có giờ vào chiều, cần kiểm tra")
 
     if has_unpaired_evening_mark:
-        missing_count = "?"
-        manual_checks.append("Có một mốc tối nhưng thiếu cặp vào/ra, chưa rõ là giờ vào hay giờ ra")
+        if missing_count != "?":
+            missing_count = max(int(missing_count or 0), 1)
+        else:
+            missing_count = "?"
+        manual_checks.append(
+            "Có dấu hiệu quên bấm ca tối: 1 lần"
+            if missing_count != "?"
+            else "Có một mốc tối nhưng thiếu cặp vào/ra, cần kiểm tra"
+        )
 
     evening_remainder_warning = _evening_remainder_warning(times)
     if evening_remainder_warning is not None:
@@ -126,9 +140,19 @@ def calculate_day(punches: list[str]) -> CalculationResult:
     if ambiguous_new_early_evening or invalid_pre_evening_sequence:
         work_value = None
     if work_value is None:
+        provisional_work = _calculate_unclassified_pair_work(times)
+        if provisional_work is not None:
+            work_value = provisional_work
+            missing_count = "?"
+            manual_checks.append("Đã tính tạm từ cặp giờ ngoài khung ca chuẩn, cần kiểm tra")
+    if work_value is None:
         if missing_count is None:
             missing_count = "?"
         manual_checks.append("Không đủ cặp giờ để tính công")
+        # The day contains punches, but they are insufficient or ambiguous.
+        # Keep the manual-review warning while using 0 as the safe payroll
+        # default instead of exporting an empty work cell.
+        work_value = 0
     elif isinstance(work_value, (int, float)):
         deduction_minutes = sum(gap.rounded_minutes for gap in mid_shift_gaps)
         deduction_minutes += sum(_rounded_penalty_minutes(value) for value in chargeable_late_events)
@@ -139,7 +163,7 @@ def calculate_day(punches: list[str]) -> CalculationResult:
         manual_checks.append("Chỉ có một lần bấm công")
     if missing_count == "?" and original_missing_count == "?":
         manual_checks.append("Dữ liệu ca mập mờ, cần kiểm tra")
-    elif missing_count and missing_count != "?":
+    elif missing_count and missing_count != "?" and not any("quên bấm" in message for message in manual_checks):
         manual_checks.append(f"Có dấu hiệu quên bấm công: {missing_count} lần")
 
     return CalculationResult(work_value, missing_count, late_minutes, manual_checks)
@@ -197,6 +221,42 @@ def _calculate_work_value(times: list[int]) -> float | None:
         return _clean(min(4, _round_half((last - max(first, MORNING_START)) / 60)))
 
     return None
+
+
+def _calculate_unclassified_pair_work(times: list[int]) -> float | None:
+    """Calculate a reviewable provisional value from otherwise clear pairs.
+
+    This is intentionally a fallback: established shift rules always run
+    first. An odd number of significant punches remains uncomputable.
+    """
+    significant_times = _collapse_duplicate_punches(times)
+    if not significant_times or len(significant_times) % 2 != 0:
+        return None
+
+    total = 0.0
+    for index in range(0, len(significant_times), 2):
+        start = significant_times[index]
+        end = significant_times[index + 1]
+        if end <= start:
+            return None
+        if _is_lunch_boundary_pair(start, end):
+            return None
+        total += _unclassified_pair_hours(start, end)
+    return _clean(total)
+
+
+def _unclassified_pair_hours(start: int, end: int) -> float:
+    if (
+        EARLY_EVENING_START_MIN <= start <= EVENING_START + LATE_DETECTION_WINDOW
+        and EVENING_OUT_MIN <= end <= EVENING_OUT_MAX
+    ):
+        return _round_work_minutes(max(0, end - EVENING_START))
+    return _round_work_minutes(end - start)
+
+
+def _is_lunch_boundary_pair(start: int, end: int) -> bool:
+    """Prevent a morning checkout and afternoon entry becoming paid work."""
+    return 11 * 60 <= start <= NOON_OUT_END and end > NOON_OUT_END
 
 
 def _morning_hours(times: list[int]) -> float:
@@ -295,6 +355,10 @@ def _afternoon_evening_restart_pair(times: list[int]) -> tuple[int, int] | None:
     if not _has_afternoon_in(times) or times[-1] <= EVENING_START:
         return None
 
+    clear_pair = _clear_afternoon_evening_restart_pair(times)
+    if clear_pair is not None:
+        return clear_pair
+
     significant_times = _collapse_duplicate_punches(times)
     checkouts = [
         value
@@ -355,6 +419,8 @@ def _evening_work_window(times: list[int]) -> tuple[int, int] | None:
 def _evening_remainder_warning(times: list[int]) -> str | None:
     evening_window = _evening_work_window(times)
     if evening_window is None:
+        return None
+    if _has_direct_evening_shift(times):
         return None
 
     effective_start, last = evening_window
@@ -530,6 +596,10 @@ def _afternoon_before_evening_value(times: list[int], afternoon: float) -> float
 
 
 def _afternoon_evening_split_pair(times: list[int]) -> tuple[int, int] | None:
+    clear_pair = _clear_afternoon_evening_restart_pair(times)
+    if clear_pair is not None:
+        return clear_pair
+
     extra_split = _extra_afternoon_evening_split_pair(times)
     if extra_split is not None:
         return extra_split
@@ -543,6 +613,32 @@ def _afternoon_evening_split_pair(times: list[int]) -> tuple[int, int] | None:
             return checkout, min(restart_after_checkout)
 
     return None
+
+
+def _clear_afternoon_evening_restart_pair(times: list[int]) -> tuple[int, int] | None:
+    """Recognize a clean afternoon checkout and early evening restart.
+
+    Exactly two raw marks must exist in the end-of-afternoon cluster.  Three
+    or more marks remain under the habitual repeated-punch rule because they
+    are inherently ambiguous.  Evening work is only inferred when a clear
+    final checkout is also present.
+    """
+    if not _has_afternoon_in(times) or not _has_evening_out(times):
+        return None
+
+    cluster = [
+        value
+        for value in times
+        if AFTERNOON_CHECKOUT_CLUSTER_START <= value <= AFTERNOON_CHECKOUT_CLUSTER_END
+    ]
+    if len(cluster) != 2:
+        return None
+
+    checkout, restart = cluster
+    if restart - checkout < MID_SHIFT_GAP_MINUTES:
+        return None
+
+    return checkout, restart
 
 
 def _extra_afternoon_evening_split_pair(times: list[int]) -> tuple[int, int] | None:
@@ -591,6 +687,8 @@ def _has_pre_evening_mark_without_afternoon_in(times: list[int]) -> bool:
     if _has_afternoon_in(times) or not _has_evening_out(times) or _is_early_evening_overtime(times):
         return False
     if _early_evening_direct_split_pair(times) is not None:
+        return False
+    if _has_direct_evening_shift(times):
         return False
 
     significant_times = _collapse_duplicate_punches(times)
@@ -661,8 +759,11 @@ def _detect_missing_count(times: list[int]) -> int | str | None:
     count = 0
     has_afternoon_in = _has_afternoon_in(times)
     has_morning_in = _has_morning_in(times)
-    has_morning_out = _has_morning_out(times)
+    has_morning_out = _has_morning_checkout_after_entry(times)
+    has_morning_out_mark = _has_morning_out(times)
     has_after_noon_punch = any(value >= 12 * 60 for value in times)
+    if has_morning_out_mark and not has_morning_in:
+        count += 1
     if has_morning_in and has_after_noon_punch and not has_morning_out:
         count += 1
 
@@ -688,8 +789,7 @@ def _detect_missing_count(times: list[int]) -> int | str | None:
         and not has_direct_evening_shift
     ):
         count += 1
-    has_afternoon_or_evening_out = any(value >= 16 * 60 + 30 for value in times)
-    if has_afternoon_in and not has_afternoon_or_evening_out:
+    if has_afternoon_in and not _has_afternoon_checkout_after_entry(times):
         count += 1
 
     has_evening_in = any(EVENING_START <= value <= EVENING_START + 30 for value in times)
@@ -777,6 +877,29 @@ def _collapse_duplicate_punches(times: list[int]) -> list[int]:
     return result
 
 
+def _normalize_end_of_afternoon_cluster(times: list[int]) -> list[int]:
+    """Collapse habitual end-of-shift punches to the actual final checkout.
+
+    This applies only when an afternoon entry already exists. Without that
+    context, marks around 17:00 may be a real short shift and are preserved.
+    A later evening restart/out pair is also preserved outside the cluster.
+    """
+    if not _has_afternoon_in(times):
+        return times
+
+    cluster = [
+        value
+        for value in times
+        if AFTERNOON_CHECKOUT_CLUSTER_START <= value <= AFTERNOON_CHECKOUT_CLUSTER_END
+    ]
+    if len(cluster) <= 1:
+        return times
+
+    actual_checkout = max(cluster)
+    cluster_values = set(cluster)
+    return [value for value in times if value not in cluster_values or value == actual_checkout]
+
+
 def _is_internal_shift_gap(start: int, end: int) -> bool:
     shifts = (
         (MORNING_START, MORNING_END),
@@ -804,6 +927,21 @@ def _late_for_shift(times: list[int], early_start: int, shift_start: int, late_u
 
 def _has_afternoon_in(times: list[int]) -> bool:
     return bool(_afternoon_in_times(times))
+
+
+def _has_afternoon_checkout_after_entry(times: list[int]) -> bool:
+    """Return whether a distinct punch closes a recognized afternoon entry.
+
+    A checkout before 16:30 is still a valid second punch. Punches inside the
+    duplicate window are collapsed first, so they cannot form a false pair.
+    """
+    significant_times = _collapse_duplicate_punches(times)
+    afternoon_entries = _afternoon_in_times(significant_times)
+    return any(
+        checkout > entry
+        for entry in afternoon_entries
+        for checkout in significant_times
+    )
 
 
 def _has_evening_out(times: list[int]) -> bool:
@@ -862,6 +1000,17 @@ def _has_morning_out(times: list[int]) -> bool:
     return any(11 * 60 <= value <= NOON_OUT_END for value in times)
 
 
+def _has_morning_checkout_after_entry(times: list[int]) -> bool:
+    """Recognize a distinct morning checkout, including an early departure."""
+    significant_times = _collapse_duplicate_punches(times)
+    morning_entries = [value for value in significant_times if value <= MORNING_START + 60]
+    return any(
+        entry < checkout <= NOON_OUT_END
+        for entry in morning_entries
+        for checkout in significant_times
+    )
+
+
 def _afternoon_in_times(times: list[int]) -> list[int]:
     has_morning_in = _has_morning_in(times)
     result: list[int] = []
@@ -877,7 +1026,10 @@ def _afternoon_in_times(times: list[int]) -> list[int]:
 def _is_extended_morning_only(times: list[int]) -> bool:
     if not _has_morning_in(times):
         return False
-    return NOON_OUT_START <= times[-1] <= NOON_OUT_END
+    return (
+        NOON_OUT_START <= times[-1] <= NOON_OUT_END
+        and not _has_morning_checkout_after_entry(times)
+    )
 
 
 def _is_short_evening_tail(times: list[int]) -> bool:
@@ -895,7 +1047,10 @@ def _is_collapsed_single_punch_cluster(times: list[int]) -> bool:
 def _is_morning_start_only_without_checkout(times: list[int]) -> bool:
     if len(times) < 2 or not _has_morning_in(times):
         return False
-    return all(value <= MORNING_START + LATE_DETECTION_WINDOW for value in times)
+    return (
+        not _has_morning_checkout_after_entry(times)
+        and all(value <= MORNING_START + LATE_DETECTION_WINDOW for value in times)
+    )
 
 
 def _round_half(hours: float) -> float:

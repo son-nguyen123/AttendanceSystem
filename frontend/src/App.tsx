@@ -5,9 +5,12 @@ import './App.css'
 const API_BASE = 'http://127.0.0.1:8000/api'
 const ROLE_LOGIN_ENABLED = false
 const SMART_SETTINGS_KEY = 'attendance-smart-settings'
+const ATTENDANCE_CALCULATION_VERSION = 7
 
 type Summary = {
   blocks: number
+  source_employee_count?: number
+  empty_employee_count?: number
   result_cells: number
   missing_cells: number
   late_cells: number
@@ -277,6 +280,7 @@ type AttendanceOverview = {
     mode: string
     final_copy_months: number[]
     machine_months: number[]
+    fallback_final_copy_months?: number[]
   }
 }
 
@@ -343,6 +347,7 @@ type FileInspection = {
 type ProfileSyncSummary = {
   profile_count?: number
   updated_count?: number
+  conflict_count?: number
 }
 
 type AppRole = 'owner' | 'staff'
@@ -417,6 +422,8 @@ type PayrollReviewItem = {
 
 type TemporaryWorkspace = {
   version: 1
+  calculation_version?: number
+  newcomer_benefit_enabled?: boolean
   saved_at: string
   factory: FactoryMode
   data: AnalyzeResponse
@@ -486,8 +493,13 @@ function App() {
   const [output2ChoiceOpen, setOutput2ChoiceOpen] = useState(false)
   const [pendingFactorySwitch, setPendingFactorySwitch] = useState<FactoryMode | null>(null)
   const [smartSettingsOpen, setSmartSettingsOpen] = useState(false)
+  const [supportOpen, setSupportOpen] = useState(false)
   const [smartScanEnabled, setSmartScanEnabled] = useState(() => readSmartSettings().smartScan)
   const [smartMappingEnabled, setSmartMappingEnabled] = useState(() => readSmartSettings().smartMapping)
+  const [newcomerBenefitEnabled, setNewcomerBenefitEnabled] = useState(() => readSmartSettings().newcomerBenefit)
+  const [showWorkDetail, setShowWorkDetail] = useState(() => readSmartSettings().showWorkDetail)
+  const [showManualChecks, setShowManualChecks] = useState(() => readSmartSettings().showManualChecks)
+  const [showEmployeeList, setShowEmployeeList] = useState(() => readSmartSettings().showEmployeeList)
   const [cardExportLoading, setCardExportLoading] = useState<'output1' | 'output2' | null>(null)
   const [historyLoading, setHistoryLoading] = useState(false)
   const [cloudLoading, setCloudLoading] = useState(false)
@@ -573,8 +585,22 @@ function App() {
           throw new Error('Phiên tạm không hợp lệ')
         }
 
+        let restoredData = workspace.data
+        const workspaceNeedsRecalculation =
+          (workspace.calculation_version ?? 0) < ATTENDANCE_CALCULATION_VERSION ||
+          workspace.newcomer_benefit_enabled !== undefined &&
+            workspace.newcomer_benefit_enabled !== newcomerBenefitEnabled
+        if (workspaceNeedsRecalculation) {
+          const refreshedResponse = await axios.post<AnalyzeResponse>(
+            `${API_BASE}/attendance/session/${workspace.data.session_id}/reanalyze`,
+            null,
+            { params: { newcomer_benefit: newcomerBenefitEnabled } },
+          )
+          restoredData = { ...workspace.data, ...refreshedResponse.data }
+        }
+
         const response = await axios.get<{ employees: PayrollEmployee[] }>(`${API_BASE}/payroll/employees`, {
-          params: { session_id: workspace.data.session_id },
+          params: { session_id: restoredData.session_id },
         })
         if (cancelled) return
 
@@ -582,16 +608,25 @@ function App() {
         const selectedEmployee =
           employees.find((employee) => employee.employee_code === workspace.selected_code) ?? employees[0]
         setFactoryMode(workspace.factory)
-        setData(workspace.data)
-        setReviewSourceSessionId(workspace.data.session_id)
+        setData(restoredData)
+        setReviewSourceSessionId(restoredData.session_id)
         setPayrollReviewItems(
-          reconcileTemporaryReviewItems(
-            workspace.data,
-            workspace.latest_history_info ?? { period: null, employee_codes: [] },
-            workspace.known_history_codes ?? [],
-            workspace.review_memory ?? null,
-            workspace.review_items ?? [],
-          ),
+          workspaceNeedsRecalculation
+            ? reconcileTemporaryReviewItems(
+                restoredData,
+                workspace.latest_history_info ?? { period: null, employee_codes: [] },
+                workspace.known_history_codes ?? [],
+                workspace.review_memory ?? null,
+                workspace.review_items ?? [],
+                true,
+              )
+            : reconcileTemporaryReviewItems(
+                restoredData,
+                workspace.latest_history_info ?? { period: null, employee_codes: [] },
+                workspace.known_history_codes ?? [],
+                workspace.review_memory ?? null,
+                workspace.review_items ?? [],
+              ),
         )
         setReviewMemory(workspace.review_memory ?? null)
         setLatestHistoryInfo(workspace.latest_history_info ?? { period: null, employee_codes: [] })
@@ -604,8 +639,8 @@ function App() {
         setPeriodYear(workspace.period_year ?? '')
         setEmployeeListMonth(workspace.employee_list_month ?? '')
         setEmployeeListYear(workspace.employee_list_year ?? '')
-        setRestoredAnalysisFilename(workspace.data.filename)
-        setMessage(`Đã khôi phục phiên tạm đang làm dở: ${workspace.data.filename}`)
+        setRestoredAnalysisFilename(restoredData.filename)
+        setMessage(`Đã khôi phục phiên tạm đang làm dở: ${restoredData.filename}`)
       } catch (error) {
         const backendUnavailable = axios.isAxiosError(error) && !error.response
         const noTemporaryWorkspace = axios.isAxiosError(error) && error.response?.status === 404
@@ -625,6 +660,8 @@ function App() {
     return () => {
       cancelled = true
     }
+  // The setting is intentionally read once during bootstrap; later changes reanalyze directly.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auth])
 
   useEffect(() => {
@@ -645,6 +682,8 @@ function App() {
 
     const workspace: TemporaryWorkspace = {
       version: 1,
+      calculation_version: ATTENDANCE_CALCULATION_VERSION,
+      newcomer_benefit_enabled: newcomerBenefitEnabled,
       saved_at: new Date().toISOString(),
       factory: data.factory ?? factoryMode,
       data,
@@ -671,6 +710,7 @@ function App() {
     factoryMode,
     knownHistoryCodes,
     latestHistoryInfo,
+    newcomerBenefitEnabled,
     payrollReviewItems,
     periodMonth,
     periodYear,
@@ -691,9 +731,16 @@ function App() {
   useEffect(() => {
     localStorage.setItem(
       SMART_SETTINGS_KEY,
-      JSON.stringify({ smartScan: smartScanEnabled, smartMapping: smartMappingEnabled }),
+      JSON.stringify({
+        smartScan: smartScanEnabled,
+        smartMapping: smartMappingEnabled,
+        newcomerBenefit: newcomerBenefitEnabled,
+        showWorkDetail,
+        showManualChecks,
+        showEmployeeList,
+      }),
     )
-  }, [smartScanEnabled, smartMappingEnabled])
+  }, [smartScanEnabled, smartMappingEnabled, newcomerBenefitEnabled, showWorkDetail, showManualChecks, showEmployeeList])
 
   async function login() {
     setLoginLoading(true)
@@ -929,6 +976,18 @@ function App() {
         await refreshPayroll(responseData.session_id)
       }
       const infoMessages: string[] = []
+      if (responseData.factory === 'factory2') {
+        const sourceCount = responseData.normalization_summary?.raw_employee_count ?? responseData.summary.blocks
+        const activeCount = responseData.normalization_summary?.retained_employee_count ?? responseData.summary.blocks
+        const emptyCount = responseData.normalization_summary?.discarded_empty_employee_count ?? 0
+        if (sourceCount > 0) {
+          infoMessages.push(
+            emptyCount > 0
+              ? `Đã đọc bảng Xưởng 2: có ${activeCount} mã có công trong tổng số ${sourceCount} mã; ${emptyCount} mã không có giờ chấm được bỏ qua.`
+              : `Đã đọc bảng Xưởng 2: cả ${activeCount} mã đều có dữ liệu chấm công.`,
+          )
+        }
+      }
       if (responseData.normalized_raw) {
         const discardedCount = responseData.normalization_summary?.discarded_empty_employee_count ?? 0
         const retainedCount = responseData.normalization_summary?.retained_employee_count ?? responseData.summary.blocks
@@ -967,7 +1026,45 @@ function App() {
     uploadForm.append('normalize_raw', String(normalizeRaw))
     uploadForm.append('factory', factoryMode)
     uploadForm.append('smart_scan', String(smartScanEnabled))
+    uploadForm.append('newcomer_benefit', String(newcomerBenefitEnabled))
     return axios.post<AnalyzeResponse | NormalizationRequiredResponse>(`${API_BASE}/attendance/analyze`, uploadForm)
+  }
+
+  async function changeNewcomerBenefitEnabled(enabled: boolean) {
+    const previous = newcomerBenefitEnabled
+    setError(null)
+    setMessage(null)
+
+    if (!data?.session_id) {
+      setNewcomerBenefitEnabled(enabled)
+      setMessage(enabled ? 'Đã bật quyền lợi ngày đầu cho lần phân tích tiếp theo.' : 'Đã tắt quyền lợi ngày đầu cho lần phân tích tiếp theo.')
+      return
+    }
+
+    setLoading(true)
+    try {
+      const response = await axios.post<AnalyzeResponse>(
+        `${API_BASE}/attendance/session/${data.session_id}/reanalyze`,
+        null,
+        { params: { newcomer_benefit: enabled } },
+      )
+      const refreshedData = { ...data, ...response.data }
+      setNewcomerBenefitEnabled(enabled)
+      setData(refreshedData)
+      setPayrollReviewItems(buildPayrollReviewItems(refreshedData, latestHistoryInfo, knownHistoryCodes, reviewMemory))
+      setReviewSourceSessionId(refreshedData.session_id)
+      if (isOwner) await refreshPayroll(refreshedData.session_id, false)
+      setMessage(
+        enabled
+          ? 'Đã bật quyền lợi ngày đầu và tính lại phiên đang mở.'
+          : 'Đã tắt quyền lợi ngày đầu và tính lại phiên đang mở; giờ công không còn được tự cộng mốc chuẩn.',
+      )
+    } catch (err) {
+      setNewcomerBenefitEnabled(previous)
+      setError(readAxiosError(err, 'Không thể tính lại phiên với cài đặt ngày đầu mới'))
+    } finally {
+      setLoading(false)
+    }
   }
 
   async function recalculateEditedWorkbook() {
@@ -1490,7 +1587,12 @@ function App() {
       await loadCloudConfig()
       await loadEmployeeRegistry(selectedCode)
       await loadHistoryPeriods(historyFilters)
-      setMessage(`Đã lưu bản sao cuối cùng: ${response.data.path}`)
+      const conflictCount = response.data.profile_sync?.conflict_count ?? 0
+      setMessage(
+        conflictCount > 0
+          ? `Đã lưu bản sao cuối cùng. ${conflictCount} mã giữ thông tin từ nguồn mới hơn để tránh ghi đè nhầm.`
+          : `Đã lưu bản sao cuối cùng: ${response.data.path}`,
+      )
     } catch (err) {
       setError(readAxiosError(err, 'Không lưu được bản sao cuối cùng'))
     } finally {
@@ -1975,7 +2077,9 @@ function App() {
         <div className="header-side">
           <div className="header-meta">
             <span className="system-status"><i />Hệ thống sẵn sàng</span>
-            <a href="tel:0905885029">Hỗ trợ kỹ thuật</a>
+            <button type="button" className="support-header-button" onClick={() => setSupportOpen(true)}>
+              Hỗ trợ kỹ thuật
+            </button>
             {isOwner && (
               <button
                 type="button"
@@ -2041,6 +2145,52 @@ function App() {
         <BankPayrollView factory={factoryMode} />
       ) : (
       <>
+      {supportOpen && (
+        <div className="support-backdrop" role="presentation" onMouseDown={() => setSupportOpen(false)}>
+          <section
+            className="support-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="support-dialog-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="support-dialog-heading">
+              <div>
+                <p className="export-choice-kicker">Kênh hỗ trợ trực tiếp</p>
+                <h2 id="support-dialog-title">Liên hệ hỗ trợ kỹ thuật</h2>
+                <p>Quét mã Zalo hoặc chọn một kênh bên dưới để báo lỗi và nhận hỗ trợ.</p>
+              </div>
+              <button type="button" className="settings-close-button" aria-label="Đóng hỗ trợ kỹ thuật" onClick={() => setSupportOpen(false)}>
+                ×
+              </button>
+            </div>
+            <div className="support-dialog-body">
+              <div className="support-qr-card">
+                <img src="/zalo-qr.png" alt="Mã QR liên hệ Zalo Nguyễn Minh Son" />
+                <span>Mở Zalo và quét mã để kết nối</span>
+              </div>
+              <div className="support-contact-list">
+                <a href="tel:0905885029" className="support-contact-card">
+                  <span className="support-contact-icon" aria-hidden="true">☎</span>
+                  <span><small>Điện thoại</small><strong>0905 885 029</strong></span>
+                  <span className="support-contact-arrow" aria-hidden="true">↗</span>
+                </a>
+                <a href="mailto:sonnm.23ai@vku.udn.vn" className="support-contact-card">
+                  <span className="support-contact-icon" aria-hidden="true">@</span>
+                  <span><small>Email</small><strong>sonnm.23ai@vku.udn.vn</strong></span>
+                  <span className="support-contact-arrow" aria-hidden="true">↗</span>
+                </a>
+                <a href="https://zalo.me/0905885029" target="_blank" rel="noreferrer" className="support-contact-card">
+                  <span className="support-contact-icon support-zalo-icon" aria-hidden="true">Z</span>
+                  <span><small>Zalo</small><strong>Nhắn tin báo lỗi website</strong></span>
+                  <span className="support-contact-arrow" aria-hidden="true">↗</span>
+                </a>
+              </div>
+            </div>
+            <p className="support-dialog-note">Nguyễn Minh Son · Trường Đại học Công nghệ Thông tin và Truyền thông Việt - Hàn, Đại học Đà Nẵng</p>
+          </section>
+        </div>
+      )}
       {smartSettingsOpen && (
         <div className="smart-settings-backdrop" role="presentation" onMouseDown={() => setSmartSettingsOpen(false)}>
           <section
@@ -2099,6 +2249,74 @@ function App() {
                 <span>{smartMappingEnabled ? 'Bật' : 'Tắt'}</span>
               </button>
             </div>
+            <div className="smart-setting-row">
+              <div>
+                <strong>Quyền lợi ngày đầu nhân viên mới</strong>
+                <span>Bật để tự quy đổi mốc chuẩn cho ca đầu của mã mới; tắt nếu chưa có lịch sử nhân viên cũ để tránh cộng giờ nhầm.</span>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={newcomerBenefitEnabled}
+                className={`toggle-switch${newcomerBenefitEnabled ? ' active' : ''}`}
+                onClick={() => void changeNewcomerBenefitEnabled(!newcomerBenefitEnabled)}
+                disabled={loading}
+              >
+                <i />
+                <span>{newcomerBenefitEnabled ? 'Bật' : 'Tắt'}</span>
+              </button>
+            </div>
+            <div className="smart-setting-divider" aria-hidden="true" />
+            <p className="smart-settings-section-label">Hiển thị bảng phân tích</p>
+            <div className="smart-setting-row">
+              <div>
+                <strong>Danh sách mã nhân viên</strong>
+                <span>Ẩn/hiện danh sách mã và tổng giờ ở cột bên trái của trang Output 1.</span>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={showEmployeeList}
+                className={`toggle-switch${showEmployeeList ? ' active' : ''}`}
+                onClick={() => setShowEmployeeList((current) => !current)}
+              >
+                <i />
+                <span>{showEmployeeList ? 'Hiện' : 'Ẩn'}</span>
+              </button>
+            </div>
+            <div className="smart-setting-row">
+              <div>
+                <strong>Chi tiết công</strong>
+                <span>Ẩn/hiện khung chi tiết công và danh sách nhân viên trong trang Output 1.</span>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={showWorkDetail}
+                className={`toggle-switch${showWorkDetail ? ' active' : ''}`}
+                onClick={() => setShowWorkDetail((current) => !current)}
+              >
+                <i />
+                <span>{showWorkDetail ? 'Hiện' : 'Ẩn'}</span>
+              </button>
+            </div>
+            <div className="smart-setting-row">
+              <div>
+                <strong>Cần kiểm tra thủ công</strong>
+                <span>Ẩn/hiện danh sách các dòng cần người dùng xem lại.</span>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={showManualChecks}
+                className={`toggle-switch${showManualChecks ? ' active' : ''}`}
+                onClick={() => setShowManualChecks((current) => !current)}
+              >
+                <i />
+                <span>{showManualChecks ? 'Hiện' : 'Ẩn'}</span>
+              </button>
+            </div>
+            <p className="smart-settings-note">Hai công tắc này chỉ thay đổi phần hiển thị; dữ liệu tính toán và file xuất vẫn được giữ nguyên.</p>
             {!smartScanEnabled && (
               <p className="smart-settings-warning">
                 Khi tắt kiểm tra, app vẫn xử lý file nhưng sẽ không cảnh báo trước nếu chọn nhầm loại bảng hoặc nhầm kỳ.
@@ -2422,6 +2640,9 @@ function App() {
           data={data}
           reviewItems={payrollReviewItems}
           onReviewItemsChange={setPayrollReviewItems}
+          showWorkDetail={showWorkDetail}
+          showManualChecks={showManualChecks}
+          showEmployeeList={showEmployeeList}
         />
       )}
 
@@ -2550,6 +2771,10 @@ function App() {
             <a href="https://zalo.me/0905885029" target="_blank" rel="noreferrer" aria-label="Nhắn Zalo để báo lỗi website">
               <span className="zalo-mark" aria-hidden="true">Z</span>
               Báo lỗi qua Zalo
+            </a>
+            <a href="mailto:sonnm.23ai@vku.udn.vn" aria-label="Gửi email đến sonnm.23ai@vku.udn.vn">
+              <span className="email-mark" aria-hidden="true">@</span>
+              sonnm.23ai@vku.udn.vn
             </a>
           </div>
         </div>
@@ -3239,7 +3464,7 @@ function CloudSettingsView({
         {config?.last_backup_path && <p className="panel-note">Backup mới nhất: {config.last_backup_path}</p>}
       </div>
 
-      <div className="panel cloud-panel">
+      <div className="panel cloud-panel cloud-note-panel">
         <div className="panel-heading">
           <h2>Ghi chú</h2>
           <span>Phân biệt dữ liệu</span>
@@ -3259,10 +3484,16 @@ function AttendanceView({
   data,
   reviewItems,
   onReviewItemsChange,
+  showWorkDetail,
+  showManualChecks,
+  showEmployeeList,
 }: {
   data: AnalyzeResponse
   reviewItems: PayrollReviewItem[]
   onReviewItemsChange: (items: PayrollReviewItem[]) => void
+  showWorkDetail: boolean
+  showManualChecks: boolean
+  showEmployeeList: boolean
 }) {
   const [selectedCode, setSelectedCode] = useState(data.blocks[0]?.employee_code ?? '')
   const selectedBlock = data.blocks.find((block) => block.employee_code === selectedCode) ?? data.blocks[0]
@@ -3279,42 +3510,46 @@ function AttendanceView({
         <Metric label="Cần kiểm tra" value={data.summary.manual_check_count} />
       </section>
 
-      <section className="attendance-output-layout">
+      <section className={`attendance-output-layout${showEmployeeList && showWorkDetail ? '' : ' attendance-output-compact'}`}>
         <nav className="payroll-tools">
-          <a href="#output1-employees">Mã NV</a>
-          <a href="#output1-detail">Chi tiết</a>
+          {showEmployeeList && <a href="#output1-employees">Mã NV</a>}
+          {showWorkDetail && <a href="#output1-detail">Chi tiết</a>}
           <a href="#output1-review">Kiểm tra</a>
-          <a href="#manual-checks">Thủ công</a>
+          {showManualChecks && <a href="#manual-checks">Thủ công</a>}
         </nav>
 
-        <div className="panel employee-list" id="output1-employees">
-          <div className="panel-heading">
-            <h2>Nhân viên</h2>
-            <span>{data.blocks.length} mã</span>
+        {showEmployeeList && (
+          <div className="panel employee-list" id="output1-employees">
+            <div className="panel-heading">
+              <h2>Nhân viên</h2>
+              <span>{data.blocks.length} mã</span>
+            </div>
+            <div className="employee-buttons">
+              {data.blocks.map((block) => (
+                <button
+                  type="button"
+                  key={block.employee_code}
+                  className={block.employee_code === selectedBlock?.employee_code ? 'active' : ''}
+                  onClick={() => setSelectedCode(block.employee_code)}
+                >
+                  <span>{block.employee_code}</span>
+                  <small>{formatNumber(totalBlockHours(block))} giờ</small>
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="employee-buttons">
-            {data.blocks.map((block) => (
-              <button
-                type="button"
-                key={block.employee_code}
-                className={block.employee_code === selectedBlock?.employee_code ? 'active' : ''}
-                onClick={() => setSelectedCode(block.employee_code)}
-              >
-                <span>{block.employee_code}</span>
-                <small>{formatNumber(totalBlockHours(block))} giờ</small>
-              </button>
-            ))}
-          </div>
-        </div>
+        )}
 
-        <EmployeeWorkPanel
-          id="output1-detail"
-          title="Chi tiết công"
-          employeeCode={selectedBlock?.employee_code ?? ''}
-          rows={selectedBlock ? blockToWorkRows(selectedBlock, data.manual_checks) : []}
-          totalHours={selectedBlock ? totalBlockHours(selectedBlock) : 0}
-          workDays={selectedBlock ? totalBlockHours(selectedBlock) / 8 : 0}
-        />
+        {showWorkDetail && (
+          <EmployeeWorkPanel
+            id="output1-detail"
+            title="Chi tiết công"
+            employeeCode={selectedBlock?.employee_code ?? ''}
+            rows={selectedBlock ? blockToWorkRows(selectedBlock, data.manual_checks) : []}
+            totalHours={selectedBlock ? totalBlockHours(selectedBlock) : 0}
+            workDays={selectedBlock ? totalBlockHours(selectedBlock) / 8 : 0}
+          />
+        )}
 
         <PayrollReviewPanel
           id="output1-review"
@@ -3324,36 +3559,38 @@ function AttendanceView({
           onChange={onReviewItemsChange}
         />
 
-        <div className="panel manual-check-panel" id="manual-checks">
-          <div className="panel-heading">
-            <h2>Cần kiểm tra thủ công</h2>
-            <span>{data.manual_checks.length} dòng</span>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Mã NV</th>
-                  <th>Ngày</th>
-                  <th>Ô giờ</th>
-                  <th>Giờ bấm</th>
-                  <th>Lý do</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.manual_checks.slice(0, 18).map((item, index) => (
-                  <tr key={`${item.employee_code}-${item.day}-${index}`}>
-                    <td>{item.employee_code}</td>
-                    <td>{item.day}</td>
-                    <td>{item.cell}</td>
-                    <td>{item.punches.join(', ')}</td>
-                    <td>{item.messages.join('; ')}</td>
+        {showManualChecks && (
+          <div className="panel manual-check-panel" id="manual-checks">
+            <div className="panel-heading">
+              <h2>Cần kiểm tra thủ công</h2>
+              <span>{data.manual_checks.length} dòng</span>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Mã NV</th>
+                    <th>Ngày</th>
+                    <th>Ô giờ</th>
+                    <th>Giờ bấm</th>
+                    <th>Lý do</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {data.manual_checks.slice(0, 18).map((item, index) => (
+                    <tr key={`${item.employee_code}-${item.day}-${index}`}>
+                      <td>{item.employee_code}</td>
+                      <td>{item.day}</td>
+                      <td>{item.cell}</td>
+                      <td>{item.punches.join(', ')}</td>
+                      <td>{item.messages.join('; ')}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
+        )}
       </section>
     </>
   )
@@ -3735,12 +3972,6 @@ function PayrollReviewPanel({
   const historyAppliedCount = items.filter((item) => item.origin === 'history-applied').length
   const ruleChangedCount = items.filter((item) => item.type === 'rule_change').length
   const newcomerReviewCount = items.filter((item) => item.novelty).length
-  const visibleItems =
-    viewMode === 'pending'
-      ? items.filter((item) => item.status === 'pending')
-      : viewMode === 'history'
-        ? items.filter((item) => item.origin === 'history-applied')
-        : items
   const reviewTypesByKey = items.reduce<Record<string, Set<'missing' | 'late'>>>((acc, item) => {
     if (item.type !== 'missing' && item.type !== 'late') return acc
     const key = reviewPairKey(item)
@@ -3756,6 +3987,17 @@ function PayrollReviewPanel({
   }, [])
   const pairedReviewKeys = new Set(pairedReviewOrder)
   const pairedReviewRanks = new Map(pairedReviewOrder.map((key, index) => [key, index]))
+  const pendingPairKeys = new Set(
+    items
+      .filter((item) => item.status === 'pending' && pairedReviewKeys.has(reviewPairKey(item)))
+      .map((item) => reviewPairKey(item)),
+  )
+  const visibleItems =
+    viewMode === 'pending'
+      ? items.filter((item) => item.status === 'pending' || pendingPairKeys.has(reviewPairKey(item)))
+      : viewMode === 'history'
+        ? items.filter((item) => item.origin === 'history-applied')
+        : items
   const sortReviewItems = (source: PayrollReviewItem[]) =>
     source
       .map((item, index) => ({ item, index }))
@@ -3768,25 +4010,42 @@ function PayrollReviewPanel({
   const missingItems = sortReviewItems(visibleItems.filter((item) => item.type === 'missing'))
   const lateItems = sortReviewItems(visibleItems.filter((item) => item.type === 'late'))
   const ruleChangeItems = visibleItems.filter((item) => item.type === 'rule_change')
-  const pairedLocks = items.reduce<Record<string, PayrollReviewType>>((locks, item) => {
+  const pairedStatuses = items.reduce<Record<string, Partial<Record<'missing' | 'late', PayrollReviewStatus>>>>((statuses, item) => {
     const key = reviewPairKey(item)
-    if (pairedReviewKeys.has(key) && item.pair_selected) locks[key] = item.type
-    return locks
+    if (!pairedReviewKeys.has(key) || (item.type !== 'missing' && item.type !== 'late')) return statuses
+    statuses[key] ??= {}
+    statuses[key][item.type] = item.status
+    return statuses
   }, {})
+
+  useEffect(() => {
+    const legacySelectedKeys = new Set(
+      items.filter((item) => item.pair_selected).map((item) => reviewPairKey(item)),
+    )
+    if (!legacySelectedKeys.size) return
+    onChange(
+      items.map((item) =>
+        legacySelectedKeys.has(reviewPairKey(item))
+          ? { ...item, status: 'pending', pair_selected: false }
+          : item,
+      ),
+    )
+  }, [items, onChange])
 
   function confirmItem(id: string) {
     const selectedItem = items.find((candidate) => candidate.id === id)
-    const selectedKey = selectedItem ? reviewPairKey(selectedItem) : ''
-    const dismissPairedReview = Boolean(selectedItem && pairedReviewKeys.has(selectedKey))
+    if (!selectedItem) return
+    const selectedKey = reviewPairKey(selectedItem)
     onChange(
       items.map((item) => {
         const isSelected = item.id === id
-        const isPairedReview = dismissPairedReview && reviewPairKey(item) === selectedKey
+        const isPairedReview = pairedReviewKeys.has(selectedKey) && reviewPairKey(item) === selectedKey
         if (!isSelected && !isPairedReview) return item
         return {
           ...item,
-          status: isSelected && hasReviewDraftChanges(item) ? 'edited' : 'ok',
-          pair_selected: isSelected,
+          ...(!isSelected && isPairedReview ? { work_value: selectedItem.work_value } : {}),
+          status: isSelected ? (hasReviewDraftChanges(item) ? 'edited' : 'ok') : item.status,
+          pair_selected: false,
         }
       }),
     )
@@ -3795,13 +4054,13 @@ function PayrollReviewPanel({
   function editItem(id: string) {
     const selectedItem = items.find((candidate) => candidate.id === id)
     const selectedKey = selectedItem ? reviewPairKey(selectedItem) : ''
-    const switchPairedReview = Boolean(selectedItem && pairedReviewKeys.has(selectedKey))
+    const reopenPairedReview = Boolean(selectedItem && pairedReviewKeys.has(selectedKey))
     onChange(
       items.map((item) => {
         const isSelected = item.id === id
-        const isPairedReview = switchPairedReview && reviewPairKey(item) === selectedKey
+        const isPairedReview = reopenPairedReview && reviewPairKey(item) === selectedKey
         if (!isSelected && !isPairedReview) return item
-        return { ...item, status: 'pending', pair_selected: isSelected }
+        return { ...item, status: 'pending', pair_selected: false }
       }),
     )
   }
@@ -3809,16 +4068,19 @@ function PayrollReviewPanel({
   function updateItem(id: string, patch: Partial<Pick<PayrollReviewItem, 'value' | 'work_value'>>) {
     const selectedItem = items.find((candidate) => candidate.id === id)
     const selectedKey = selectedItem ? reviewPairKey(selectedItem) : ''
-    const switchPairedReview = Boolean(selectedItem && pairedReviewKeys.has(selectedKey))
+    const isPairedUpdate = Boolean(selectedItem && pairedReviewKeys.has(selectedKey))
+    const syncWorkValue = isPairedUpdate && Object.prototype.hasOwnProperty.call(patch, 'work_value')
     onChange(
       items.map((item) => {
         const isSelected = item.id === id
-        const isPairedReview = switchPairedReview && reviewPairKey(item) === selectedKey
+        const isPairedReview = isPairedUpdate && reviewPairKey(item) === selectedKey
         if (!isSelected && !isPairedReview) return item
         return {
           ...item,
           ...(isSelected ? patch : {}),
-          pair_selected: isSelected,
+          ...(syncWorkValue && !isSelected ? { work_value: patch.work_value ?? item.work_value } : {}),
+          status: isSelected || syncWorkValue ? 'pending' : item.status,
+          pair_selected: false,
         }
       }),
     )
@@ -3865,7 +4127,7 @@ function PayrollReviewPanel({
       )}
       {pairedReviewKeys.size > 0 && (
         <div className="panel-note review-pair-note">
-          <span><i className="review-pair-dot" />Có {pairedReviewKeys.size} cặp trùng công (trễ + chưa rõ); app đã đưa lên đầu và xếp song song để kiểm tra.</span>
+          <span><i className="review-pair-dot" />Có {pairedReviewKeys.size} cặp cần duyệt hai bên (trễ + chưa rõ). OK một bên sẽ đồng bộ Công và đánh dấu bên còn lại cần kiểm tra tiếp; cặp chỉ hoàn tất sau khi cả hai bên đều OK.</span>
         </div>
       )}
       <div className="review-grid">
@@ -3874,7 +4136,7 @@ function PayrollReviewPanel({
           valueLabel="Ghi chú"
           items={missingItems}
           pairedReviewKeys={pairedReviewKeys}
-          pairedLocks={pairedLocks}
+          pairedStatuses={pairedStatuses}
           firstWorkDays={firstWorkDays}
           onConfirm={confirmItem}
           onEdit={editItem}
@@ -3885,7 +4147,7 @@ function PayrollReviewPanel({
           valueLabel="Phút trễ"
           items={lateItems}
           pairedReviewKeys={pairedReviewKeys}
-          pairedLocks={pairedLocks}
+          pairedStatuses={pairedStatuses}
           firstWorkDays={firstWorkDays}
           onConfirm={confirmItem}
           onEdit={editItem}
@@ -3896,7 +4158,7 @@ function PayrollReviewPanel({
           valueLabel="Công cũ"
           items={ruleChangeItems}
           pairedReviewKeys={pairedReviewKeys}
-          pairedLocks={pairedLocks}
+          pairedStatuses={pairedStatuses}
           firstWorkDays={firstWorkDays}
           onConfirm={confirmItem}
           onEdit={editItem}
@@ -4139,7 +4401,7 @@ function ReviewTable({
   valueLabel,
   items,
   pairedReviewKeys,
-  pairedLocks,
+  pairedStatuses = {},
   firstWorkDays,
   onConfirm,
   onEdit,
@@ -4149,7 +4411,7 @@ function ReviewTable({
   valueLabel: string
   items: PayrollReviewItem[]
   pairedReviewKeys: Set<string>
-  pairedLocks: Record<string, PayrollReviewType>
+  pairedStatuses: Record<string, Partial<Record<'missing' | 'late', PayrollReviewStatus>>>
   firstWorkDays: Record<string, number>
   onConfirm: (id: string) => void
   onEdit: (id: string) => void
@@ -4179,7 +4441,10 @@ function ReviewTable({
               const pairKey = reviewPairKey(item)
               const isPairedReview = pairedReviewKeys.has(pairKey)
               const isFirstWorkDayReview = item.status === 'pending' && item.novelty === 'first-time' && (item.type === 'missing' || item.type === 'late') && firstWorkDays[item.employee_code] === item.day
-              const lockedByOtherSide = pairedReviewKeys.has(pairKey) && Boolean(pairedLocks[pairKey]) && pairedLocks[pairKey] !== item.type
+              const peerType = item.type === 'missing' ? 'late' : 'missing'
+              const currentReviewed = isPairedReview && item.status !== 'pending'
+              const peerReviewed = isPairedReview && pairedStatuses[pairKey]?.[peerType] !== 'pending'
+              const needsPairCheck = isPairedReview && item.status === 'pending' && peerReviewed
               return (
               <tr
                 key={item.id}
@@ -4187,22 +4452,24 @@ function ReviewTable({
                   item.status === 'pending' ? 'warning-row' : 'selected-row',
                   item.novelty ? 'review-newcomer-row' : '',
                   isPairedReview ? 'review-paired-row' : '',
-                  lockedByOtherSide ? 'review-peer-locked' : '',
+                  currentReviewed ? 'review-pair-checked' : '',
+                  needsPairCheck ? 'review-pair-next' : '',
                 ].join(' ')}
                 title={isPairedReview ? 'Cặp trùng công: dòng trễ và dòng chưa rõ được xếp song song để kiểm tra.' : undefined}
               >
-                <td>{item.employee_code}</td>
-                <td>
-                  <span className="review-day-value">{item.day}</span>
+                <td className={isFirstWorkDayReview ? 'review-employee-cell has-first-day-mark' : 'review-employee-cell'}>
+                  <span>{item.employee_code}</span>
                   {isFirstWorkDayReview && (
                     <span
                       className="review-first-day-mark"
                       title="Mã mới · đây là ngày đầu tiên có dữ liệu trong tháng · nên kiểm tra/chấm tay"
                       aria-label="Mã mới, ngày đầu tiên có dữ liệu trong tháng"
-                    >
-                      ✦
-                    </span>
+                      tabIndex={0}
+                    />
                   )}
+                </td>
+                <td>
+                  <span className="review-day-value">{item.day}</span>
                 </td>
                 <td>
                   <span className="review-punch-list">
@@ -4214,7 +4481,7 @@ function ReviewTable({
                     className="table-input"
                     value={item.value}
                     placeholder="Xóa"
-                    disabled={lockedByOtherSide}
+                    disabled={currentReviewed}
                     onChange={(event) => onUpdate(item.id, { value: event.target.value })}
                   />
                 </td>
@@ -4223,15 +4490,27 @@ function ReviewTable({
                     className="table-input"
                     value={item.work_value}
                     placeholder="Xóa"
-                    disabled={lockedByOtherSide}
+                    disabled={currentReviewed}
                     onChange={(event) => onUpdate(item.id, { work_value: event.target.value })}
                   />
                 </td>
-                <td>{lockedByOtherSide ? <span className="review-peer-lock-label">Đã chọn bên kia</span> : reviewStatusLabel(item.status)}</td>
+                <td>
+                  {needsPairCheck ? (
+                    <span className="review-pair-next-label">Kiểm tra tiếp</span>
+                  ) : currentReviewed ? (
+                    <span className="review-pair-checked-label"><b>✓</b> Đã kiểm tra</span>
+                  ) : reviewStatusLabel(item.status)}
+                </td>
                 <td>
                   <div className="table-actions">
-                    <button type="button" disabled={lockedByOtherSide} onClick={() => onConfirm(item.id)}>OK</button>
-                    <button type="button" onClick={() => onEdit(item.id)}>Sửa</button>
+                    <button type="button" disabled={currentReviewed} onClick={() => onConfirm(item.id)}>OK</button>
+                    <button
+                      type="button"
+                      title={isPairedReview ? 'Mở lại cả cặp để kiểm tra và sửa' : 'Sửa kết quả này'}
+                      onClick={() => onEdit(item.id)}
+                    >
+                      Sửa
+                    </button>
                   </div>
                 </td>
               </tr>
@@ -5155,8 +5434,10 @@ function AttendanceOverviewView({
         </div>
         {overview?.source && (
           <p className="panel-note">
-            Uu tien ban chot Drive: {overview.source.final_copy_months.length ? overview.source.final_copy_months.map((month) => `T${month}`).join(', ') : 'chua co'}.
-            {' '}Ban may cham: {overview.source.machine_months.length ? overview.source.machine_months.map((month) => `T${month}`).join(', ') : 'khong co'}.
+            Lịch sử đã lưu: {overview.source.machine_months.length ? overview.source.machine_months.map((month) => `T${month}`).join(', ') : 'chưa có'}.
+            {' '}Bản sao cuối dự phòng: {overview.source.fallback_final_copy_months?.length
+              ? overview.source.fallback_final_copy_months.map((month) => `T${month}`).join(', ')
+              : 'không có'}.
           </p>
         )}
         <div className="overview-controls">
@@ -5910,24 +6191,29 @@ function buildPayrollReviewItems(
     return acc
   }, {})
   const historyPeriodLabel = reviewMemory?.period?.label ?? ''
+  const firstWorkDays = firstWorkDaysByEmployee(data)
 
   return data.blocks.flatMap((block) =>
     block.results.flatMap((result) => {
       const messages = manualByEmployeeDay[`${block.employee_code}-${result.day}`] ?? []
       const history = memoryByEmployeeDay[reviewKey(block.employee_code, result.day)]
       const historyMatchesPunches = history ? samePunches(history.punches, result.punches) : false
+      const defaultWorkValue = result.work_value === null ? 0 : result.work_value
+      const novelty = employeeNoveltyForPeriod(block.employee_code, data.period, latestHistoryInfo, knownHistoryCodes)
+      const isNewcomerFirstWorkDay = Boolean(novelty) && firstWorkDays[block.employee_code] === result.day
+      const hideZeroWorkReview = Number(defaultWorkValue) === 0 && !isNewcomerFirstWorkDay
       const base = {
         employee_code: block.employee_code,
-        novelty: employeeNoveltyForPeriod(block.employee_code, data.period, latestHistoryInfo, knownHistoryCodes),
+        novelty,
         day: result.day,
         punches: result.punches,
         messages,
-        original_work_value: result.work_value,
-        work_value: result.work_value === null ? '' : String(result.work_value),
+        original_work_value: defaultWorkValue,
+        work_value: String(defaultWorkValue),
         status: 'pending' as PayrollReviewStatus,
       }
       const items: PayrollReviewItem[] = []
-      if (result.missing_count !== null) {
+      if (result.missing_count === '?' && !hideZeroWorkReview) {
         items.push({
           ...base,
           id: `missing-${block.employee_code}-${result.day}`,
@@ -5936,7 +6222,7 @@ function buildPayrollReviewItems(
           value: String(result.missing_count),
         })
       }
-      if (result.missing_count === null && messages.includes('Không đủ cặp giờ để tính công')) {
+      if (result.missing_count === null && !hideZeroWorkReview && messages.includes('Không đủ cặp giờ để tính công')) {
         items.push({
           ...base,
           id: `missing-incomplete-pair-${block.employee_code}-${result.day}`,
@@ -5945,7 +6231,7 @@ function buildPayrollReviewItems(
           value: '?',
         })
       }
-      if (result.late_minutes !== null) {
+      if (result.late_minutes !== null && result.missing_count === '?' && !hideZeroWorkReview) {
         items.push({
           ...base,
           id: `late-${block.employee_code}-${result.day}`,
@@ -5980,6 +6266,7 @@ function reconcileTemporaryReviewItems(
   knownHistoryCodes: string[],
   reviewMemory: ReviewMemory | null,
   savedItems: PayrollReviewItem[],
+  recalculated = false,
 ): PayrollReviewItem[] {
   const derivedItems = buildPayrollReviewItems(data, latestHistoryInfo, knownHistoryCodes, reviewMemory)
   const savedById = new Map(savedItems.map((item) => [item.id, item]))
@@ -5987,10 +6274,27 @@ function reconcileTemporaryReviewItems(
   return derivedItems.map((derivedItem) => {
     const savedItem = savedById.get(derivedItem.id)
     if (!savedItem) return derivedItem
+    if (recalculated) {
+      const valueChanged = String(savedItem.value ?? '') !== String(savedItem.original_value ?? '')
+      const workValueChanged = String(savedItem.work_value ?? '') !== String(savedItem.original_work_value ?? '')
+      if (!valueChanged && !workValueChanged) return derivedItem
+      return {
+        ...derivedItem,
+        value: valueChanged ? savedItem.value : derivedItem.value,
+        work_value: workValueChanged ? savedItem.work_value : derivedItem.work_value,
+        status: savedItem.status,
+      }
+    }
     return {
       ...derivedItem,
       value: savedItem.value,
-      work_value: savedItem.work_value,
+      // Older unfinished sessions stored an uncomputable work value as an
+      // empty string. Migrate only that legacy blank to the new default 0;
+      // preserve every value the user actually entered.
+      work_value:
+        derivedItem.work_value === '0' && String(savedItem.work_value ?? '').trim() === ''
+          ? '0'
+          : savedItem.work_value,
       status: savedItem.status,
       pair_selected: savedItem.pair_selected,
     }
@@ -6278,13 +6582,28 @@ function readSmartSettings() {
     const saved = JSON.parse(localStorage.getItem(SMART_SETTINGS_KEY) ?? '{}') as {
       smartScan?: boolean
       smartMapping?: boolean
+      newcomerBenefit?: boolean
+      showWorkDetail?: boolean
+      showManualChecks?: boolean
+      showEmployeeList?: boolean
     }
     return {
       smartScan: saved.smartScan ?? true,
       smartMapping: saved.smartMapping ?? true,
+      newcomerBenefit: saved.newcomerBenefit ?? false,
+      showWorkDetail: saved.showWorkDetail ?? true,
+      showManualChecks: saved.showManualChecks ?? true,
+      showEmployeeList: saved.showEmployeeList ?? true,
     }
   } catch {
-    return { smartScan: true, smartMapping: true }
+    return {
+      smartScan: true,
+      smartMapping: true,
+      newcomerBenefit: false,
+      showWorkDetail: true,
+      showManualChecks: true,
+      showEmployeeList: true,
+    }
   }
 }
 

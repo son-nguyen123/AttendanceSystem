@@ -97,7 +97,12 @@ def create_period_excel_backup(config: dict[str, Any], detail: dict[str, Any], r
         shutil.copy2(source, target)
         copied.append(str(target))
         if key == "output2_path":
-            profile_sync = sync_owner_profiles_from_workbook(target)
+            profile_sync = sync_owner_profiles_from_workbook(
+                target,
+                month=_period_month_int(period),
+                year=_period_year_int(period),
+                source_kind="history_output2",
+            )
 
     readme = target_dir / "README.txt"
     readme.write_text(
@@ -147,7 +152,12 @@ def create_analysis_excel_copy(
     safe_name = _safe_filename(original_filename or source_path.name)
     target = target_dir / f"Xuong{2 if factory == 'factory2' else 1}_{year}-{month:02d}_BanDangPhanTich_{timestamp}_{safe_name}"
     shutil.copy2(source_path, target)
-    profile_sync = sync_owner_profiles_from_workbook(target)
+    profile_sync = sync_owner_profiles_from_workbook(
+        target,
+        month=month,
+        year=year,
+        source_kind="analysis_copy",
+    )
 
     readme = target_dir / "README.txt"
     readme.write_text(
@@ -194,7 +204,12 @@ def create_final_excel_copy(
     safe_name = _safe_filename(original_filename or source_path.name)
     target = target_dir / f"Xuong{2 if factory == 'factory2' else 1}_{year}-{month:02d}_BanChot_{timestamp}_{safe_name}"
     shutil.copy2(source_path, target)
-    profile_sync = sync_owner_profiles_from_workbook(target)
+    profile_sync = sync_owner_profiles_from_workbook(
+        target,
+        month=month,
+        year=year,
+        source_kind="final_copy",
+    )
 
     readme = target_dir / "README.txt"
     readme.write_text(

@@ -20,17 +20,6 @@ function Test-PortListening {
     return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
 }
 
-function Test-HttpOk {
-    param([string]$Url)
-
-    try {
-        $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 3
-        return ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300)
-    } catch {
-        return $false
-    }
-}
-
 function Wait-HttpOk {
     param(
         [string]$Url,
@@ -84,25 +73,24 @@ if (-not (Test-Path (Join-Path $FrontendDir "node_modules"))) {
     throw "Khong tim thay frontend\node_modules. Hay chay setup.bat truoc."
 }
 
-if (Test-PortListening 8000) {
-    if (-not (Test-HttpOk -Url $ApiUrl)) {
-        Stop-PortProcess -Port 8000
-        Start-Sleep -Milliseconds 500
-        Start-Backend
-    }
-} else {
-    Start-Backend
+# Always restart both local app ports. A health check alone cannot tell an old
+# AttendanceSystem process from the current source tree, so reusing a listener
+# could silently serve stale UI/rules after an update.
+Stop-PortProcess -Port 8000
+Stop-PortProcess -Port 5173
+Start-Sleep -Milliseconds 500
+if ((Test-PortListening -Port 8000) -or (Test-PortListening -Port 5173)) {
+    throw "Khong the giai phong cong 8000/5173 de chay phien ban hien tai."
 }
 
-if (-not (Test-PortListening 5173)) {
-    Start-Process `
-        -FilePath "powershell.exe" `
-        -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "run-frontend.ps1")) `
-        -WorkingDirectory $Root `
-        -RedirectStandardOutput $FrontendOut `
-        -RedirectStandardError $FrontendErr `
-        -WindowStyle Hidden
-}
+Start-Backend
+Start-Process `
+    -FilePath "powershell.exe" `
+    -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "run-frontend.ps1")) `
+    -WorkingDirectory $Root `
+    -RedirectStandardOutput $FrontendOut `
+    -RedirectStandardError $FrontendErr `
+    -WindowStyle Hidden
 
 $backendReady = Wait-HttpOk -Url $ApiUrl -Seconds 30
 $frontendReady = Wait-HttpOk -Url $AppUrl -Seconds 30

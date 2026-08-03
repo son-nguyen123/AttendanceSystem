@@ -35,6 +35,7 @@ from app.services.history_store import (
     search_employee_history,
     update_employee_monthly_record,
 )
+from app.services.session_overrides import merge_session_overrides
 
 
 router = APIRouter(prefix="/history", tags=["history"])
@@ -135,7 +136,10 @@ def save_history(request: SaveHistoryRequest, user: dict = Depends(require_owner
             month=request.month,
             year=request.year,
             label=request.label,
-            review_overrides=request.review_overrides,
+            review_overrides=merge_session_overrides(
+                STORAGE_DIR / request.session_id,
+                request.review_overrides,
+            ),
             factory=factory,
         )
     except Exception as exc:

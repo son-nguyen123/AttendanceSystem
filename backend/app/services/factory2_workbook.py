@@ -14,7 +14,7 @@ from openpyxl.utils import get_column_letter
 from app.models.attendance import DayComputation
 from app.services.attendance_calculator import calculate_day
 from app.services.payroll_workbook import export_payroll_workbook
-from app.services.payroll_store import calculate_daily_salary, calculate_hourly_salary, calculate_monthly_salary, get_payroll_entry
+from app.services.payroll_store import PayrollEntry, calculate_daily_salary, calculate_hourly_salary, calculate_monthly_salary, get_payroll_entry
 from app.services.punch_parser import parse_punches
 from app.services.workbook_processor import export_processed_workbook
 
@@ -44,7 +44,7 @@ class Factory2Employee:
 
 
 def analyze_factory2_workbook(path: Path) -> dict:
-    employees, sheet_name, period = _read_active_employees(path)
+    employees, sheet_name, period, employee_counts = _read_active_employees(path)
     rows: list[dict] = []
     manual_checks: list[dict] = []
     result_cells = 0
@@ -103,6 +103,8 @@ def analyze_factory2_workbook(path: Path) -> dict:
         "period": period,
         "summary": {
             "blocks": len(employees),
+            "source_employee_count": employee_counts["source_employee_count"],
+            "empty_employee_count": employee_counts["empty_employee_count"],
             "result_cells": result_cells,
             "missing_cells": missing_cells,
             "late_cells": late_cells,
@@ -113,11 +115,18 @@ def analyze_factory2_workbook(path: Path) -> dict:
     }
 
 
-def preview_factory2_payroll(source_path: Path, review_overrides: list[dict] | None = None) -> dict:
-    employees, sheet_name, _period = _read_active_employees(source_path, review_overrides=review_overrides)
+def preview_factory2_payroll(
+    source_path: Path,
+    review_overrides: list[dict] | None = None,
+    profile_codes: set[str] | None = None,
+) -> dict:
+    employees, sheet_name, _period, _employee_counts = _read_active_employees(
+        source_path,
+        review_overrides=review_overrides,
+    )
     return {
         "sheet_name": sheet_name,
-        "employees": [_build_employee_preview(employee) for employee in employees],
+        "employees": [_build_employee_preview(employee, profile_codes=profile_codes) for employee in employees],
     }
 
 
@@ -141,6 +150,7 @@ def export_factory2_output2(
     output_path: Path,
     review_overrides: list[dict] | None = None,
     include_saved_data: bool = True,
+    profile_codes: set[str] | None = None,
 ) -> Path:
     with NamedTemporaryFile(suffix=".xlsx", delete=False) as temp_file:
         temp_source = Path(temp_file.name)
@@ -152,6 +162,7 @@ def export_factory2_output2(
             output_path,
             review_overrides=review_overrides,
             include_saved_data=include_saved_data,
+            profile_codes=profile_codes,
         )
     finally:
         temp_source.unlink(missing_ok=True)
@@ -166,7 +177,10 @@ def _export_factory2_output2_vertical(
     output_path: Path,
     review_overrides: list[dict] | None = None,
 ) -> Path:
-    employees, sheet_name, period = _read_active_employees(source_path, review_overrides=review_overrides)
+    employees, sheet_name, period, _employee_counts = _read_active_employees(
+        source_path,
+        review_overrides=review_overrides,
+    )
     wb = Workbook()
     ws = wb.active
     ws.title = _safe_sheet_title(sheet_name)
@@ -185,7 +199,7 @@ def _export_factory2_output2_vertical(
 
 
 def _write_factory1_shaped_source(source_path: Path, output_path: Path) -> Path:
-    employees, sheet_name, period = _read_active_employees(source_path)
+    employees, sheet_name, period, _employee_counts = _read_active_employees(source_path)
     wb = Workbook()
     ws = wb.active
     ws.title = _safe_sheet_title(sheet_name)
@@ -315,7 +329,12 @@ def _is_sunday(period: dict[str, int | str | None], day: int) -> bool:
 def _read_active_employees(
     path: Path,
     review_overrides: list[dict] | None = None,
-) -> tuple[list[Factory2Employee], str, dict[str, int | str | None]]:
+) -> tuple[
+    list[Factory2Employee],
+    str,
+    dict[str, int | str | None],
+    dict[str, int],
+]:
     wb = load_workbook(path, data_only=True)
     try:
         ws, header_row, columns = _select_factory2_sheet(wb)
@@ -357,7 +376,11 @@ def _read_active_employees(
             "year": period_year,
             "label": f"{period_month:02d}/{period_year}" if period_month and period_year else "",
         }
-        return active_employees, ws.title, period
+        employee_counts = {
+            "source_employee_count": len(employees_by_code),
+            "empty_employee_count": len(employees_by_code) - len(active_employees),
+        }
+        return active_employees, ws.title, period, employee_counts
     finally:
         wb.close()
 
@@ -451,8 +474,10 @@ def _empty_day_result(value: date) -> dict:
     }
 
 
-def _build_employee_preview(employee: Factory2Employee) -> dict:
+def _build_employee_preview(employee: Factory2Employee, profile_codes: set[str] | None = None) -> dict:
     entry = get_payroll_entry(employee.employee_code)
+    if profile_codes is not None and employee.employee_code not in profile_codes:
+        entry = PayrollEntry()
     total_hours = _employee_total_hours(employee)
     monthly_salary = calculate_monthly_salary(entry)
     daily_salary = calculate_daily_salary(entry)

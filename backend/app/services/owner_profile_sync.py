@@ -12,7 +12,13 @@ from app.services.payroll_store import merge_payroll_profile_updates, normalize_
 SUMMARY_MIN_COL = 32
 
 
-def sync_owner_profiles_from_workbook(path: Path) -> dict[str, Any]:
+def sync_owner_profiles_from_workbook(
+    path: Path,
+    *,
+    month: int | None = None,
+    year: int | None = None,
+    source_kind: str = "workbook",
+) -> dict[str, Any]:
     if not path.exists() or not path.is_file():
         return _empty_result(str(path), "file_not_found")
 
@@ -23,12 +29,22 @@ def sync_owner_profiles_from_workbook(path: Path) -> dict[str, Any]:
         for worksheet in workbook.worksheets:
             updates.update(_extract_profiles_from_sheet(worksheet))
 
-        result = merge_payroll_profile_updates(updates)
+        result = merge_payroll_profile_updates(
+            updates,
+            source_month=month,
+            source_year=year,
+            source_kind=source_kind,
+            source_name=path.name,
+        )
         result.update(
             {
                 "status": "ok",
                 "source_path": str(path),
+                "source_month": month,
+                "source_year": year,
+                "source_kind": source_kind,
                 "profile_count": len(updates),
+                "profile_codes": sorted(updates),
                 "fields": ["name", "start_work_note", "monthly_salary", "daily_salary", "hourly_salary"],
             }
         )
@@ -139,5 +155,7 @@ def _empty_result(source_path: str, reason: str) -> dict[str, Any]:
         "skipped_count": 0,
         "updated_codes": [],
         "skipped_codes": [],
+        "conflict_count": 0,
+        "conflict_codes": [],
         "fields": [],
     }

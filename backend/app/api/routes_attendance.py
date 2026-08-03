@@ -25,6 +25,8 @@ from app.services.workbook_guard import (
     inspect_workbook_for_role,
     validate_mapping_pair,
 )
+from app.services.newcomer_benefit import apply_newcomer_first_day_benefits
+from app.services.session_overrides import merge_session_overrides, save_automatic_overrides
 
 
 router = APIRouter(tags=["attendance"])
@@ -133,6 +135,7 @@ async def analyze_attendance(
     normalize_raw: bool = Form(False),
     factory: Literal["factory1", "factory2"] = Form("factory1"),
     smart_scan: bool = Form(True),
+    newcomer_benefit: bool = Form(True),
     user: dict = Depends(require_staff_or_owner),
 ) -> dict:
     suffix = Path(file.filename or "").suffix.lower()
@@ -157,16 +160,25 @@ async def analyze_attendance(
         if factory == "factory2":
             shutil.copy2(uploaded_path, original_path)
             result = analyze_factory2_workbook(original_path)
+            source_employee_count = result["summary"].get(
+                "source_employee_count",
+                result["summary"]["blocks"],
+            )
+            retained_employee_count = result["summary"]["blocks"]
             result["session_id"] = session_id
             result["filename"] = file.filename
             result["factory"] = factory
             result["normalized_raw"] = False
             result["missing_output1_summary"] = False
             result["normalization_summary"] = {
-                "raw_employee_count": result["summary"]["blocks"],
-                "retained_employee_count": result["summary"]["blocks"],
-                "discarded_empty_employee_count": 0,
+                "raw_employee_count": source_employee_count,
+                "retained_employee_count": retained_employee_count,
+                "discarded_empty_employee_count": source_employee_count - retained_employee_count,
             }
+            save_automatic_overrides(
+                session_dir,
+                apply_newcomer_first_day_benefits(result, factory) if newcomer_benefit else [],
+            )
             return result
 
         layout = inspect_workbook_layout(uploaded_path)
@@ -207,6 +219,10 @@ async def analyze_attendance(
         "retained_employee_count": layout.retained_employee_count,
         "discarded_empty_employee_count": layout.discarded_empty_employee_count,
     }
+    save_automatic_overrides(
+        session_dir,
+        apply_newcomer_first_day_benefits(result, factory) if newcomer_benefit else [],
+    )
     return result
 
 
@@ -219,10 +235,11 @@ def export_attendance(session_id: str, user: dict = Depends(require_staff_or_own
 
     output_path = session_dir / "attendance_processed.xlsx"
     try:
+        review_overrides = merge_session_overrides(session_dir)
         if _session_factory(session_id) == "factory2":
-            export_factory2_output1(originals[0], output_path)
+            export_factory2_output1(originals[0], output_path, review_overrides=review_overrides)
         else:
-            export_processed_workbook(originals[0], output_path)
+            export_processed_workbook(originals[0], output_path, review_overrides=review_overrides)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Không xuất được file Excel: {exc}") from exc
 
@@ -231,6 +248,49 @@ def export_attendance(session_id: str, user: dict = Depends(require_staff_or_own
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename="Output1.xlsx",
     )
+
+
+@router.post("/attendance/session/{session_id}/reanalyze")
+def reanalyze_temporary_attendance_session(
+    session_id: str,
+    newcomer_benefit: bool = True,
+    user: dict = Depends(require_staff_or_owner),
+) -> dict:
+    if len(session_id) != 32 or any(character not in "0123456789abcdef" for character in session_id.lower()):
+        raise HTTPException(status_code=400, detail="Mã phiên tạm không hợp lệ")
+
+    session_dir = STORAGE_DIR / session_id
+    originals = list(session_dir.glob("original.xlsx")) + list(session_dir.glob("original.xlsm"))
+    if not originals:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dữ liệu nguồn của phiên tạm")
+
+    metadata: dict = {}
+    metadata_path = session_dir / "metadata.json"
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except Exception:
+            metadata = {}
+
+    factory = _session_factory(session_id)
+    try:
+        result = (
+            analyze_factory2_workbook(originals[0])
+            if factory == "factory2"
+            else analyze_workbook(originals[0])
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Không thể tính lại phiên tạm: {exc}") from exc
+
+    result["session_id"] = session_id
+    result["filename"] = metadata.get("filename") or originals[0].name
+    result["factory"] = factory
+    result["normalized_raw"] = bool(metadata.get("normalized_raw", False))
+    save_automatic_overrides(
+        session_dir,
+        apply_newcomer_first_day_benefits(result, factory) if newcomer_benefit else [],
+    )
+    return result
 
 
 @router.delete("/attendance/session/{session_id}")
@@ -366,7 +426,10 @@ def export_attendance_with_overrides(
 
     output_path = session_dir / "attendance_processed.xlsx"
     try:
-        review_overrides = [item.model_dump(include=item.model_fields_set) for item in request.review_overrides]
+        review_overrides = merge_session_overrides(
+            session_dir,
+            [item.model_dump(include=item.model_fields_set) for item in request.review_overrides],
+        )
         if _session_factory(request.session_id) == "factory2":
             export_factory2_output1(originals[0], output_path, review_overrides=review_overrides)
         else:
@@ -432,7 +495,10 @@ def submit_to_owner(
             factory = "factory1"
         _apply_review_overrides_to_analysis(
             analysis,
-            [item.model_dump(include=item.model_fields_set) for item in request.review_overrides],
+            merge_session_overrides(
+                session_dir,
+                [item.model_dump(include=item.model_fields_set) for item in request.review_overrides],
+            ),
         )
         result = submit_attendance_to_owner(
             analysis,
@@ -534,7 +600,10 @@ def _prepare_employee_cards_zip(request: EmployeeCardsExportRequest) -> Path:
             card_source,
             output_path,
             request.kind,
-            review_overrides=[item.model_dump(include=item.model_fields_set) for item in request.review_overrides],
+            review_overrides=merge_session_overrides(
+                session_dir,
+                [item.model_dump(include=item.model_fields_set) for item in request.review_overrides],
+            ),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Không xuất được phiếu nhân viên: {exc}") from exc

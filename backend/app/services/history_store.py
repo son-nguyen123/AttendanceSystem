@@ -250,7 +250,25 @@ def save_session_to_history(
                     ),
                 )
 
-    return get_period_detail(period_id)
+    profile_updates = {
+        normalize_employee_code(code): {
+            key: payroll.get(key)
+            for key in ("name", "start_work_note", "monthly_salary", "daily_salary", "hourly_salary")
+            if payroll.get(key) not in (None, "")
+        }
+        for code, payroll in payroll_by_code.items()
+        if normalize_employee_code(code) and isinstance(payroll, dict)
+    }
+    profile_sync = merge_payroll_profile_updates(
+        profile_updates,
+        source_month=selected_month,
+        source_year=selected_year,
+        source_kind="history_output2",
+        source_name=source_filename,
+    )
+    detail = get_period_detail(period_id)
+    detail["profile_sync"] = profile_sync
+    return detail
 
 
 def list_periods(
@@ -449,7 +467,11 @@ def update_employee_monthly_record(period_id: str, employee_code: str, updates: 
                 "name": values["employee_name"],
                 "hourly_salary": values["hourly_salary"],
             }
-        }
+        },
+        source_month=int(period["month"]),
+        source_year=int(period["year"]),
+        source_kind="history_output2",
+        source_name=str(period["source_filename"] or ""),
     )
     return get_period_detail(period_id)
 
@@ -667,8 +689,7 @@ def get_attendance_overview(year: int | None = None, factory: str | None = None)
         latest_by_month: dict[int, sqlite3.Row] = {}
         for row in period_rows:
             month = int(row["month"])
-            if month not in final_months:
-                latest_by_month[month] = row
+            latest_by_month[month] = row
 
         periods = list(latest_by_month.values())
         period_ids = [str(row["id"]) for row in periods]
@@ -763,6 +784,11 @@ def get_attendance_overview(year: int | None = None, factory: str | None = None)
 
     for copy_item in selected_final_copies:
         month = int(copy_item["month"])
+        # A saved history period is the trusted result produced by the app's
+        # rules. The final-copy workbook is only a fallback for months where
+        # no history exists, because its external layout may omit review data.
+        if month in latest_by_month:
+            continue
         try:
             final_rows = read_final_copy_overview(Path(str(copy_item["path"])), month)
         except Exception:
@@ -833,10 +859,11 @@ def get_attendance_overview(year: int | None = None, factory: str | None = None)
             "total_hours": _round_number(total_hours),
         },
         "source": {
-            "mode": "prefer_final_copy",
+            "mode": "prefer_history_fallback_final_copy",
             "factory": factory,
             "final_copy_months": sorted(final_months),
             "machine_months": sorted(latest_by_month),
+            "fallback_final_copy_months": sorted(final_months - set(latest_by_month)),
         },
     }
 
