@@ -2365,6 +2365,17 @@ button:disabled {
   line-height: 1.45;
 }
 
+.review-punch-list {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  line-height: 1.4;
+}
+
+.review-punch-list span {
+  white-space: nowrap;
+}
+
 .review-title {
   display: flex;
   align-items: center;

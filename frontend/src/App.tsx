@@ -4171,7 +4171,11 @@ function ReviewTable({
               >
                 <td>{item.employee_code}</td>
                 <td>{item.day}</td>
-                <td>{item.punches.join(', ')}</td>
+                <td>
+                  <span className="review-punch-list">
+                    {item.punches.map((punch) => <span key={punch}>{punch}</span>)}
+                  </span>
+                </td>
                 <td>
                   <input
                     className="table-input"
