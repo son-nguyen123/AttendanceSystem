@@ -412,6 +412,24 @@ type PayrollReviewItem = {
   history_work_value?: number | string | null
   history_review_notes?: string[]
   history_period_label?: string
+  pair_selected?: boolean
+}
+
+type TemporaryWorkspace = {
+  version: 1
+  saved_at: string
+  factory: FactoryMode
+  data: AnalyzeResponse
+  review_items: PayrollReviewItem[]
+  review_memory: ReviewMemory | null
+  latest_history_info: LatestHistoryInfo
+  known_history_codes: string[]
+  selected_code: string
+  active_view: ActiveView
+  period_month: string
+  period_year: string
+  employee_list_month: string
+  employee_list_year: string
 }
 
 function App() {
@@ -430,6 +448,9 @@ function App() {
   const [finalCopyInspecting, setFinalCopyInspecting] = useState(false)
   const [fileInspectingRole, setFileInspectingRole] = useState<WorkbookRole | null>(null)
   const [data, setData] = useState<AnalyzeResponse | null>(null)
+  const [workspaceHydrated, setWorkspaceHydrated] = useState(false)
+  const [reviewSourceSessionId, setReviewSourceSessionId] = useState('')
+  const [restoredAnalysisFilename, setRestoredAnalysisFilename] = useState('')
   const [reviewMemory, setReviewMemory] = useState<ReviewMemory | null>(null)
   const [payrollEmployees, setPayrollEmployees] = useState<PayrollEmployee[]>([])
   const [employeeRegistry, setEmployeeRegistry] = useState<PayrollEmployee[]>([])
@@ -538,10 +559,116 @@ function App() {
   }, [auth?.access_token])
 
   useEffect(() => {
+    if (ROLE_LOGIN_ENABLED && !auth) return
+    let cancelled = false
+
+    async function restoreTemporaryWorkspace() {
+      let finishHydration = true
+      try {
+        localStorage.removeItem('attendance-temporary-workspace-v1')
+        const workspaceResponse = await axios.get<TemporaryWorkspace>(`${API_BASE}/attendance/temporary-workspace`)
+        const workspace = workspaceResponse.data
+        if (workspace.version !== 1 || !workspace.data?.session_id || workspace.factory !== workspace.data.factory) {
+          throw new Error('Phiên tạm không hợp lệ')
+        }
+
+        const response = await axios.get<{ employees: PayrollEmployee[] }>(`${API_BASE}/payroll/employees`, {
+          params: { session_id: workspace.data.session_id },
+        })
+        if (cancelled) return
+
+        const employees = response.data.employees
+        const selectedEmployee =
+          employees.find((employee) => employee.employee_code === workspace.selected_code) ?? employees[0]
+        setFactoryMode(workspace.factory)
+        setData(workspace.data)
+        setReviewSourceSessionId(workspace.data.session_id)
+        setPayrollReviewItems(workspace.review_items ?? [])
+        setReviewMemory(workspace.review_memory ?? null)
+        setLatestHistoryInfo(workspace.latest_history_info ?? { period: null, employee_codes: [] })
+        setKnownHistoryCodes(workspace.known_history_codes ?? [])
+        setPayrollEmployees(employees)
+        setSelectedCode(selectedEmployee?.employee_code ?? '')
+        setForm(selectedEmployee ? formFromEmployee(selectedEmployee) : emptyPayrollForm())
+        setActiveView(workspace.active_view === 'payroll' ? 'payroll' : 'attendance')
+        setPeriodMonth(workspace.period_month ?? '')
+        setPeriodYear(workspace.period_year ?? '')
+        setEmployeeListMonth(workspace.employee_list_month ?? '')
+        setEmployeeListYear(workspace.employee_list_year ?? '')
+        setRestoredAnalysisFilename(workspace.data.filename)
+        setMessage(`Đã khôi phục phiên tạm đang làm dở: ${workspace.data.filename}`)
+      } catch (error) {
+        const backendUnavailable = axios.isAxiosError(error) && !error.response
+        const noTemporaryWorkspace = axios.isAxiosError(error) && error.response?.status === 404
+        if (backendUnavailable) {
+          finishHydration = false
+          if (!cancelled) setMessage('Backend chưa sẵn sàng để khôi phục phiên tạm. Hãy tải lại trang sau vài giây.')
+        } else if (!noTemporaryWorkspace) {
+          void axios.delete(`${API_BASE}/attendance/temporary-workspace`).catch(() => undefined)
+          if (!cancelled) setMessage('Phiên tạm cũ không còn dữ liệu nguồn nên đã được dọn khỏi máy.')
+        }
+      } finally {
+        if (!cancelled && finishHydration) setWorkspaceHydrated(true)
+      }
+    }
+
+    void restoreTemporaryWorkspace()
+    return () => {
+      cancelled = true
+    }
+  }, [auth])
+
+  useEffect(() => {
+    if (!workspaceHydrated) return
+    if (data && reviewSourceSessionId === data.session_id) return
     // Review rows are editable derived state and must be reset when their source analysis changes.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPayrollReviewItems(data ? buildPayrollReviewItems(data, latestHistoryInfo, knownHistoryCodes, reviewMemory) : [])
-  }, [data, latestHistoryInfo, knownHistoryCodes, reviewMemory])
+    setReviewSourceSessionId(data?.session_id ?? '')
+  }, [data, latestHistoryInfo, knownHistoryCodes, reviewMemory, reviewSourceSessionId, workspaceHydrated])
+
+  useEffect(() => {
+    if (!workspaceHydrated) return
+    if (!data) {
+      void axios.delete(`${API_BASE}/attendance/temporary-workspace`).catch(() => undefined)
+      return
+    }
+
+    const workspace: TemporaryWorkspace = {
+      version: 1,
+      saved_at: new Date().toISOString(),
+      factory: data.factory ?? factoryMode,
+      data,
+      review_items: payrollReviewItems,
+      review_memory: reviewMemory,
+      latest_history_info: latestHistoryInfo,
+      known_history_codes: knownHistoryCodes,
+      selected_code: selectedCode,
+      active_view: activeView,
+      period_month: periodMonth,
+      period_year: periodYear,
+      employee_list_month: employeeListMonth,
+      employee_list_year: employeeListYear,
+    }
+    const saveTimer = window.setTimeout(() => {
+      void axios.put(`${API_BASE}/attendance/temporary-workspace`, workspace).catch(() => undefined)
+    }, 180)
+    return () => window.clearTimeout(saveTimer)
+  }, [
+    activeView,
+    data,
+    employeeListMonth,
+    employeeListYear,
+    factoryMode,
+    knownHistoryCodes,
+    latestHistoryInfo,
+    payrollReviewItems,
+    periodMonth,
+    periodYear,
+    reviewMemory,
+    selectedCode,
+    workspaceHydrated,
+  ])
 
   useEffect(() => {
     if (ROLE_LOGIN_ENABLED && auth?.user.role !== 'owner') return
@@ -595,6 +722,27 @@ function App() {
     setError(null)
   }
 
+  function clearTemporaryAnalysis(keepSelectedFile = false) {
+    const temporarySessionId = data?.session_id
+    if (temporarySessionId) {
+      void axios.delete(`${API_BASE}/attendance/session/${temporarySessionId}`).catch(() => undefined)
+    }
+    void axios.delete(`${API_BASE}/attendance/temporary-workspace`).catch(() => undefined)
+    if (!keepSelectedFile) setFile(null)
+    setData(null)
+    setReviewSourceSessionId('')
+    setRestoredAnalysisFilename('')
+    setPayrollEmployees([])
+    setPayrollReviewItems([])
+    setReviewMemory(null)
+    setSelectedCode('')
+    setForm(emptyPayrollForm())
+    setPeriodMonth('')
+    setPeriodYear('')
+    setEmployeeListMonth('')
+    setEmployeeListYear('')
+  }
+
   async function inspectSelectedFile(selectedFile: File, role: WorkbookRole): Promise<FileInspection | null> {
     const lowerName = selectedFile.name.toLowerCase()
     if (!lowerName.endsWith('.xlsx') && !lowerName.endsWith('.xlsm')) {
@@ -624,13 +772,22 @@ function App() {
   }
 
   async function selectAnalysisFile(selectedFile: File | null) {
-    setFile(null)
-    setData(null)
-    setPayrollEmployees([])
-    setSelectedCode('')
     setError(null)
     setMessage(null)
-    if (!selectedFile) return
+    if (!selectedFile) {
+      setFile(null)
+      return
+    }
+    if (
+      data &&
+      !window.confirm(
+        `Bạn đang có một phiên phân tích tạm chưa lưu vào lịch sử.\n\n` +
+          `Chọn file mới sẽ bỏ toàn bộ phần đang làm dở của ${data.filename}. Bạn có muốn tiếp tục?`,
+      )
+    ) {
+      return
+    }
+    clearTemporaryAnalysis()
     if (!smartScanEnabled) {
       if (!isExcelFile(selectedFile)) {
         setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xlsx hoặc .xlsm.`)
@@ -695,6 +852,17 @@ function App() {
   async function analyze() {
     if (!file) return
 
+    if (
+      data &&
+      !window.confirm(
+        `Phân tích lại sẽ thay thế phiên tạm đang làm dở của ${data.filename}.\n\n` +
+          `Bạn có muốn bỏ phiên hiện tại và tiếp tục không?`,
+      )
+    ) {
+      return
+    }
+    if (data) clearTemporaryAnalysis(true)
+
     setLoading(true)
     setError(null)
     setMessage(null)
@@ -740,6 +908,8 @@ function App() {
       const reviewItems = buildPayrollReviewItems(responseData, latestInfo, knownCodes, memory)
       setReviewMemory(memory)
       setData(responseData)
+      setReviewSourceSessionId(responseData.session_id)
+      setRestoredAnalysisFilename(responseData.filename)
       setPeriodMonth(responseData.period?.month ? String(responseData.period.month) : '')
       setPeriodYear(responseData.period?.year ? String(responseData.period.year) : '')
       setEmployeeListMonth(responseData.period?.month ? String(responseData.period.month) : '')
@@ -917,11 +1087,12 @@ function App() {
 
   function changeFactoryMode(nextMode: FactoryMode) {
     if (nextMode === factoryMode) return
+    clearTemporaryAnalysis()
+    setMappingCurrentFile(null)
+    setMappingPreviousFile(null)
+    setRecalculateFile(null)
+    setFinalCopyFile(null)
     setFactoryMode(nextMode)
-    setData(null)
-    setPayrollEmployees([])
-    setPayrollReviewItems([])
-    setReviewMemory(null)
     setHistoryPeriods([])
     setHistoryFinalCopies([])
     setHistoryDetail(null)
@@ -1921,11 +2092,12 @@ function App() {
       <section className="upload-panel">
         <div className="upload-copy">
           <strong>Thêm bảng Excel</strong>
-          <span>Phân tích tạm không ghi vào lịch sử; chỉ khi bấm Lưu vào lịch sử thì kỳ này mới được giữ lại để mở sau.</span>
+          <span>Phiên đang làm dở được giữ tạm trên máy và tự khôi phục sau khi restart; chưa ghi vào lịch sử hoặc Drive.</span>
         </div>
         <ExcelDropZone
           id="excel-file"
           file={file}
+          displayName={restoredAnalysisFilename}
           placeholder="Bảng chấm công gốc"
           busy={fileInspectingRole === 'analysis' ? 'Đang nhận diện file...' : null}
           disabled={loading}
@@ -3441,6 +3613,10 @@ function PayrollView({
   )
 }
 
+function reviewPairKey(item: Pick<PayrollReviewItem, 'employee_code' | 'day'>) {
+  return `${item.employee_code}:${item.day}`
+}
+
 function PayrollReviewPanel({
   id = 'payroll-review',
   title = 'Kiểm tra Output',
@@ -3466,31 +3642,65 @@ function PayrollReviewPanel({
   const missingItems = visibleItems.filter((item) => item.type === 'missing')
   const lateItems = visibleItems.filter((item) => item.type === 'late')
   const ruleChangeItems = visibleItems.filter((item) => item.type === 'rule_change')
+  const pairedReviewKeys = new Set(
+    items
+      .filter((item) => item.type === 'missing' || item.type === 'late')
+      .map((item) => reviewPairKey(item))
+      .filter((key, index, keys) => keys.indexOf(key) !== index),
+  )
+  const pairedLocks = items.reduce<Record<string, PayrollReviewType>>((locks, item) => {
+    const key = reviewPairKey(item)
+    if (pairedReviewKeys.has(key) && item.pair_selected) locks[key] = item.type
+    return locks
+  }, {})
 
   function confirmItem(id: string) {
+    const selectedItem = items.find((candidate) => candidate.id === id)
+    const selectedKey = selectedItem ? reviewPairKey(selectedItem) : ''
+    const dismissPairedReview = Boolean(selectedItem && pairedReviewKeys.has(selectedKey))
     onChange(
-      items.map((item) =>
-        item.id === id
-          ? { ...item, status: hasReviewDraftChanges(item) ? 'edited' : 'ok' }
-          : item,
-      ),
+      items.map((item) => {
+        const isSelected = item.id === id
+        const isPairedReview = dismissPairedReview && reviewPairKey(item) === selectedKey
+        if (!isSelected && !isPairedReview) return item
+        return {
+          ...item,
+          status: isSelected && hasReviewDraftChanges(item) ? 'edited' : 'ok',
+          pair_selected: isSelected,
+        }
+      }),
     )
   }
 
   function editItem(id: string) {
-    onChange(items.map((item) => (item.id === id ? { ...item, status: 'pending' } : item)))
+    const selectedItem = items.find((candidate) => candidate.id === id)
+    const selectedKey = selectedItem ? reviewPairKey(selectedItem) : ''
+    const switchPairedReview = Boolean(selectedItem && pairedReviewKeys.has(selectedKey))
+    onChange(
+      items.map((item) => {
+        const isSelected = item.id === id
+        const isPairedReview = switchPairedReview && reviewPairKey(item) === selectedKey
+        if (!isSelected && !isPairedReview) return item
+        return { ...item, status: 'pending', pair_selected: isSelected }
+      }),
+    )
   }
 
   function updateItem(id: string, patch: Partial<Pick<PayrollReviewItem, 'value' | 'work_value'>>) {
+    const selectedItem = items.find((candidate) => candidate.id === id)
+    const selectedKey = selectedItem ? reviewPairKey(selectedItem) : ''
+    const switchPairedReview = Boolean(selectedItem && pairedReviewKeys.has(selectedKey))
     onChange(
-      items.map((item) =>
-        item.id === id
-          ? {
-              ...item,
-              ...patch,
-            }
-          : item,
-      ),
+      items.map((item) => {
+        const isSelected = item.id === id
+        const isPairedReview = switchPairedReview && reviewPairKey(item) === selectedKey
+        if (!isSelected && !isPairedReview) return item
+        return {
+          ...item,
+          ...(isSelected ? patch : {}),
+          pair_selected: isSelected,
+        }
+      }),
     )
   }
 
@@ -3538,6 +3748,8 @@ function PayrollReviewPanel({
           title="Quên bấm / chưa rõ"
           valueLabel="Ghi chú"
           items={missingItems}
+          pairedReviewKeys={pairedReviewKeys}
+          pairedLocks={pairedLocks}
           onConfirm={confirmItem}
           onEdit={editItem}
           onUpdate={updateItem}
@@ -3546,6 +3758,8 @@ function PayrollReviewPanel({
           title="Đi trễ"
           valueLabel="Phút trễ"
           items={lateItems}
+          pairedReviewKeys={pairedReviewKeys}
+          pairedLocks={pairedLocks}
           onConfirm={confirmItem}
           onEdit={editItem}
           onUpdate={updateItem}
@@ -3554,6 +3768,8 @@ function PayrollReviewPanel({
           title="Đổi công do rule"
           valueLabel="Công cũ"
           items={ruleChangeItems}
+          pairedReviewKeys={pairedReviewKeys}
+          pairedLocks={pairedLocks}
           onConfirm={confirmItem}
           onEdit={editItem}
           onUpdate={updateItem}
@@ -3794,6 +4010,8 @@ function ReviewTable({
   title,
   valueLabel,
   items,
+  pairedReviewKeys,
+  pairedLocks,
   onConfirm,
   onEdit,
   onUpdate,
@@ -3801,6 +4019,8 @@ function ReviewTable({
   title: string
   valueLabel: string
   items: PayrollReviewItem[]
+  pairedReviewKeys: Set<string>
+  pairedLocks: Record<string, PayrollReviewType>
   onConfirm: (id: string) => void
   onEdit: (id: string) => void
   onUpdate: (id: string, patch: Partial<Pick<PayrollReviewItem, 'value' | 'work_value'>>) => void
@@ -3825,12 +4045,16 @@ function ReviewTable({
             </tr>
           </thead>
           <tbody>
-            {items.map((item) => (
+            {items.map((item) => {
+              const pairKey = reviewPairKey(item)
+              const lockedByOtherSide = pairedReviewKeys.has(pairKey) && Boolean(pairedLocks[pairKey]) && pairedLocks[pairKey] !== item.type
+              return (
               <tr
                 key={item.id}
                 className={[
                   item.status === 'pending' ? 'warning-row' : 'selected-row',
                   item.novelty ? 'review-newcomer-row' : '',
+                  lockedByOtherSide ? 'review-peer-locked' : '',
                 ].join(' ')}
               >
                 <td>{item.employee_code}</td>
@@ -3841,6 +4065,7 @@ function ReviewTable({
                     className="table-input"
                     value={item.value}
                     placeholder="Xóa"
+                    disabled={lockedByOtherSide}
                     onChange={(event) => onUpdate(item.id, { value: event.target.value })}
                   />
                 </td>
@@ -3849,18 +4074,20 @@ function ReviewTable({
                     className="table-input"
                     value={item.work_value}
                     placeholder="Xóa"
+                    disabled={lockedByOtherSide}
                     onChange={(event) => onUpdate(item.id, { work_value: event.target.value })}
                   />
                 </td>
-                <td>{reviewStatusLabel(item.status)}</td>
+                <td>{lockedByOtherSide ? <span className="review-peer-lock-label">Đã chọn bên kia</span> : reviewStatusLabel(item.status)}</td>
                 <td>
                   <div className="table-actions">
-                    <button type="button" onClick={() => onConfirm(item.id)}>OK</button>
+                    <button type="button" disabled={lockedByOtherSide} onClick={() => onConfirm(item.id)}>OK</button>
                     <button type="button" onClick={() => onEdit(item.id)}>Sửa</button>
                   </div>
                 </td>
               </tr>
-            ))}
+              )
+            })}
             {!items.length && (
               <tr>
                 <td colSpan={7}>Không có dữ liệu</td>
@@ -5076,6 +5303,7 @@ function Metric({ label, value }: { label: string; value: number | string }) {
 function ExcelDropZone({
   id,
   file,
+  displayName,
   placeholder,
   busy,
   disabled = false,
@@ -5083,6 +5311,7 @@ function ExcelDropZone({
 }: {
   id: string
   file: File | null
+  displayName?: string
   placeholder: string
   busy?: string | null
   disabled?: boolean
@@ -5127,8 +5356,8 @@ function ExcelDropZone({
           receiveFile(selectedFile)
         }}
       />
-      <label htmlFor={id} title={file?.name ?? placeholder}>
-        <span>{dragging ? 'Thả file vào đây' : busy || file?.name || placeholder}</span>
+      <label htmlFor={id} title={file?.name || displayName || placeholder}>
+        <span>{dragging ? 'Thả file vào đây' : busy || file?.name || displayName || placeholder}</span>
       </label>
     </div>
   )

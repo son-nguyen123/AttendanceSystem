@@ -31,6 +31,7 @@ router = APIRouter(tags=["attendance"])
 
 STORAGE_DIR = Path(__file__).resolve().parents[2] / "storage"
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+TEMPORARY_WORKSPACE_PATH = STORAGE_DIR / "temporary_workspace.json"
 
 
 class AttendanceReviewOverride(BaseModel):
@@ -60,6 +61,49 @@ class AttendanceSubmitResponse(BaseModel):
     period_id: str
     employees: int
     daily_rows: int
+
+
+@router.get("/attendance/temporary-workspace")
+def get_temporary_workspace(user: dict = Depends(require_staff_or_owner)) -> dict:
+    if not TEMPORARY_WORKSPACE_PATH.exists():
+        raise HTTPException(status_code=404, detail="Không có phiên tạm")
+    try:
+        workspace = json.loads(TEMPORARY_WORKSPACE_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Phiên tạm bị lỗi định dạng") from exc
+
+    session_id = str((workspace.get("data") or {}).get("session_id") or "")
+    if not session_id or not (STORAGE_DIR / session_id).exists():
+        TEMPORARY_WORKSPACE_PATH.unlink(missing_ok=True)
+        raise HTTPException(status_code=404, detail="Nguồn của phiên tạm không còn tồn tại")
+    return workspace
+
+
+@router.put("/attendance/temporary-workspace")
+def save_temporary_workspace(
+    workspace: dict,
+    user: dict = Depends(require_staff_or_owner),
+) -> dict[str, str]:
+    data = workspace.get("data") or {}
+    session_id = str(data.get("session_id") or "")
+    factory = str(workspace.get("factory") or "")
+    if len(session_id) != 32 or any(character not in "0123456789abcdef" for character in session_id.lower()):
+        raise HTTPException(status_code=400, detail="Mã phiên tạm không hợp lệ")
+    if factory not in {"factory1", "factory2"} or factory != str(data.get("factory") or ""):
+        raise HTTPException(status_code=400, detail="Xưởng của phiên tạm không khớp")
+    if not (STORAGE_DIR / session_id).exists():
+        raise HTTPException(status_code=404, detail="Không tìm thấy dữ liệu nguồn của phiên tạm")
+
+    temporary_path = TEMPORARY_WORKSPACE_PATH.with_suffix(".tmp")
+    temporary_path.write_text(json.dumps(workspace, ensure_ascii=False), encoding="utf-8")
+    temporary_path.replace(TEMPORARY_WORKSPACE_PATH)
+    return {"status": "ok"}
+
+
+@router.delete("/attendance/temporary-workspace")
+def delete_temporary_workspace(user: dict = Depends(require_staff_or_owner)) -> dict[str, str]:
+    TEMPORARY_WORKSPACE_PATH.unlink(missing_ok=True)
+    return {"status": "ok"}
 
 
 @router.post("/attendance/inspect-file")
@@ -187,6 +231,27 @@ def export_attendance(session_id: str, user: dict = Depends(require_staff_or_own
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename="Output1.xlsx",
     )
+
+
+@router.delete("/attendance/session/{session_id}")
+def delete_temporary_attendance_session(
+    session_id: str,
+    user: dict = Depends(require_staff_or_owner),
+) -> dict[str, str]:
+    if len(session_id) != 32 or any(character not in "0123456789abcdef" for character in session_id.lower()):
+        raise HTTPException(status_code=400, detail="Mã phiên tạm không hợp lệ")
+
+    session_dir = STORAGE_DIR / session_id
+    if session_dir.exists():
+        shutil.rmtree(session_dir)
+    if TEMPORARY_WORKSPACE_PATH.exists():
+        try:
+            workspace = json.loads(TEMPORARY_WORKSPACE_PATH.read_text(encoding="utf-8"))
+            if str((workspace.get("data") or {}).get("session_id") or "") == session_id:
+                TEMPORARY_WORKSPACE_PATH.unlink(missing_ok=True)
+        except Exception:
+            TEMPORARY_WORKSPACE_PATH.unlink(missing_ok=True)
+    return {"status": "ok"}
 
 
 @router.post("/attendance/recalculate-totals")

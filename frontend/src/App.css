@@ -2410,6 +2410,60 @@ button:disabled {
   background: #fff8f0;
 }
 
+.review-peer-locked {
+  opacity: 0.58;
+  transition: opacity 180ms ease, background-color 180ms ease;
+}
+
+.review-peer-locked td {
+  border-top: 2px solid rgba(55, 108, 178, 0.26);
+  border-bottom: 2px solid rgba(55, 108, 178, 0.26);
+  animation: review-peer-outline 1.8s ease-in-out infinite;
+}
+
+.review-peer-locked td:first-child {
+  border-left: 2px solid rgba(55, 108, 178, 0.26);
+  border-radius: 8px 0 0 8px;
+}
+
+.review-peer-locked td:last-child {
+  border-right: 2px solid rgba(55, 108, 178, 0.26);
+  border-radius: 0 8px 8px 0;
+}
+
+@keyframes review-peer-outline {
+  0%, 100% { border-color: rgba(55, 108, 178, 0.2); }
+  50% { border-color: rgba(55, 108, 178, 0.58); }
+}
+
+.review-peer-locked:hover {
+  opacity: 0.72;
+}
+
+.review-peer-locked .table-input {
+  color: #8a94a6;
+  background: #f3f5f8;
+  border-color: #dfe4ec;
+  cursor: not-allowed;
+}
+
+.review-peer-locked .table-actions button:not(:last-child) {
+  opacity: 0.55;
+}
+
+.review-peer-lock-label {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid #d8e0ec;
+  border-radius: 999px;
+  color: #667085;
+  background: #f5f7fa;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .review-newcomer-row td {
   color: #7c4a03;
   background: #fff9db;
