@@ -3725,15 +3725,33 @@ function PayrollReviewPanel({
       : viewMode === 'history'
         ? items.filter((item) => item.origin === 'history-applied')
         : items
-  const missingItems = visibleItems.filter((item) => item.type === 'missing')
-  const lateItems = visibleItems.filter((item) => item.type === 'late')
+  const reviewTypesByKey = items.reduce<Record<string, Set<'missing' | 'late'>>>((acc, item) => {
+    if (item.type !== 'missing' && item.type !== 'late') return acc
+    const key = reviewPairKey(item)
+    acc[key] ??= new Set()
+    acc[key].add(item.type)
+    return acc
+  }, {})
+  const pairedReviewOrder = items.reduce<string[]>((order, item) => {
+    const key = reviewPairKey(item)
+    const isPaired = reviewTypesByKey[key]?.has('missing') && reviewTypesByKey[key]?.has('late')
+    if (isPaired && !order.includes(key)) order.push(key)
+    return order
+  }, [])
+  const pairedReviewKeys = new Set(pairedReviewOrder)
+  const pairedReviewRanks = new Map(pairedReviewOrder.map((key, index) => [key, index]))
+  const sortReviewItems = (source: PayrollReviewItem[]) =>
+    source
+      .map((item, index) => ({ item, index }))
+      .sort((left, right) => {
+        const leftRank = pairedReviewRanks.get(reviewPairKey(left.item)) ?? Number.MAX_SAFE_INTEGER
+        const rightRank = pairedReviewRanks.get(reviewPairKey(right.item)) ?? Number.MAX_SAFE_INTEGER
+        return leftRank - rightRank || left.index - right.index
+      })
+      .map(({ item }) => item)
+  const missingItems = sortReviewItems(visibleItems.filter((item) => item.type === 'missing'))
+  const lateItems = sortReviewItems(visibleItems.filter((item) => item.type === 'late'))
   const ruleChangeItems = visibleItems.filter((item) => item.type === 'rule_change')
-  const pairedReviewKeys = new Set(
-    items
-      .filter((item) => item.type === 'missing' || item.type === 'late')
-      .map((item) => reviewPairKey(item))
-      .filter((key, index, keys) => keys.indexOf(key) !== index),
-  )
   const pairedLocks = items.reduce<Record<string, PayrollReviewType>>((locks, item) => {
     const key = reviewPairKey(item)
     if (pairedReviewKeys.has(key) && item.pair_selected) locks[key] = item.type
@@ -3827,6 +3845,11 @@ function PayrollReviewPanel({
       {newcomerReviewCount > 0 && (
         <div className="panel-note review-priority-note">
           <span><i className="legend-dot first-time-dot" />Dòng vàng là mã mới lần đầu hoặc quay lại, nên kiểm tra kỹ.</span>
+        </div>
+      )}
+      {pairedReviewKeys.size > 0 && (
+        <div className="panel-note review-pair-note">
+          <span><i className="review-pair-dot" />Có {pairedReviewKeys.size} cặp trùng công (trễ + chưa rõ); app đã đưa lên đầu và xếp song song để kiểm tra.</span>
         </div>
       )}
       <div className="review-grid">
@@ -4133,6 +4156,7 @@ function ReviewTable({
           <tbody>
             {items.map((item) => {
               const pairKey = reviewPairKey(item)
+              const isPairedReview = pairedReviewKeys.has(pairKey)
               const lockedByOtherSide = pairedReviewKeys.has(pairKey) && Boolean(pairedLocks[pairKey]) && pairedLocks[pairKey] !== item.type
               return (
               <tr
@@ -4140,8 +4164,10 @@ function ReviewTable({
                 className={[
                   item.status === 'pending' ? 'warning-row' : 'selected-row',
                   item.novelty ? 'review-newcomer-row' : '',
+                  isPairedReview ? 'review-paired-row' : '',
                   lockedByOtherSide ? 'review-peer-locked' : '',
                 ].join(' ')}
+                title={isPairedReview ? 'Cặp trùng công: dòng trễ và dòng chưa rõ được xếp song song để kiểm tra.' : undefined}
               >
                 <td>{item.employee_code}</td>
                 <td>{item.day}</td>
