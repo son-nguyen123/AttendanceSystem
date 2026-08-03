@@ -2895,6 +2895,92 @@ table {
   line-height: 1.55;
 }
 
+.factory-switch-backdrop {
+  background: rgba(19, 31, 52, 0.5);
+  backdrop-filter: blur(5px);
+}
+
+.factory-switch-dialog {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 18px;
+  width: min(590px, 100%);
+  padding: 26px;
+  border: 1px solid #f1d3d1;
+  border-radius: 20px;
+  background: #ffffff;
+  box-shadow: 0 28px 80px rgba(20, 36, 62, 0.28);
+  animation: factory-dialog-enter 180ms ease-out;
+}
+
+.factory-switch-dialog-icon {
+  display: grid;
+  width: 52px;
+  height: 52px;
+  place-items: center;
+  border: 1px solid #f5c7c3;
+  border-radius: 16px;
+  color: #b42318;
+  background: #fff1f0;
+  font-size: 24px;
+  font-weight: 900;
+  box-shadow: 0 8px 22px rgba(180, 35, 24, 0.12);
+}
+
+.factory-switch-dialog-copy h2 {
+  margin: 4px 0 9px;
+  color: #18243a;
+  font-size: 23px;
+}
+
+.factory-switch-dialog-copy > p:not(.export-choice-kicker) {
+  margin: 0;
+  color: #58667a;
+  line-height: 1.58;
+}
+
+.factory-switch-dialog-note {
+  margin-top: 14px;
+  padding: 11px 13px;
+  border: 1px solid #f1dfb4;
+  border-radius: 10px;
+  color: #72510d;
+  background: #fff9e8;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.factory-switch-dialog-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.factory-switch-dialog-actions button {
+  min-height: 42px;
+  padding: 0 16px;
+}
+
+.factory-switch-dialog-actions .danger-button {
+  border-color: #c9362b;
+  color: #ffffff;
+  background: #c9362b;
+  box-shadow: 0 8px 18px rgba(201, 54, 43, 0.2);
+}
+
+.factory-switch-dialog-actions .danger-button:hover {
+  border-color: #a92820;
+  background: #a92820;
+  transform: translateY(-1px);
+}
+
+@keyframes factory-dialog-enter {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 .export-choice-kicker {
   margin: 0;
   color: #2563d9;
@@ -3086,6 +3172,27 @@ td {
   .footer-bottom {
     grid-column: auto;
     flex-direction: column;
+  }
+
+  .factory-switch-dialog {
+    grid-template-columns: 44px minmax(0, 1fr);
+    gap: 14px;
+    padding: 22px;
+  }
+
+  .factory-switch-dialog-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 13px;
+    font-size: 21px;
+  }
+
+  .factory-switch-dialog-actions {
+    flex-direction: column-reverse;
+  }
+
+  .factory-switch-dialog-actions button {
+    width: 100%;
   }
 
   .export-choice-options {

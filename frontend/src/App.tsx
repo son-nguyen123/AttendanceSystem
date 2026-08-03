@@ -484,6 +484,7 @@ function App() {
   const [output1Loading, setOutput1Loading] = useState(false)
   const [payrollLoading, setPayrollLoading] = useState(false)
   const [output2ChoiceOpen, setOutput2ChoiceOpen] = useState(false)
+  const [pendingFactorySwitch, setPendingFactorySwitch] = useState<FactoryMode | null>(null)
   const [smartSettingsOpen, setSmartSettingsOpen] = useState(false)
   const [smartScanEnabled, setSmartScanEnabled] = useState(() => readSmartSettings().smartScan)
   const [smartMappingEnabled, setSmartMappingEnabled] = useState(() => readSmartSettings().smartMapping)
@@ -1087,6 +1088,14 @@ function App() {
 
   function changeFactoryMode(nextMode: FactoryMode) {
     if (nextMode === factoryMode) return
+    if (data) {
+      setPendingFactorySwitch(nextMode)
+      return
+    }
+    applyFactoryMode(nextMode)
+  }
+
+  function applyFactoryMode(nextMode: FactoryMode) {
     clearTemporaryAnalysis()
     setMappingCurrentFile(null)
     setMappingPreviousFile(null)
@@ -1105,6 +1114,13 @@ function App() {
     setError(null)
     setMessage(null)
     setActiveView(isOwner ? 'employees' : 'attendance')
+  }
+
+  function confirmFactorySwitch() {
+    if (!pendingFactorySwitch) return
+    const nextMode = pendingFactorySwitch
+    setPendingFactorySwitch(null)
+    applyFactoryMode(nextMode)
   }
 
   function createRegistryEmployee() {
@@ -2053,6 +2069,41 @@ function App() {
                 Khi tắt kiểm tra, app vẫn xử lý file nhưng sẽ không cảnh báo trước nếu chọn nhầm loại bảng hoặc nhầm kỳ.
               </p>
             )}
+          </section>
+        </div>
+      )}
+
+      {pendingFactorySwitch && (
+        <div className="export-choice-backdrop factory-switch-backdrop" role="presentation" onMouseDown={() => setPendingFactorySwitch(null)}>
+          <section
+            className="factory-switch-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="factory-switch-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="factory-switch-dialog-icon" aria-hidden="true">!</div>
+            <div className="factory-switch-dialog-copy">
+              <p className="export-choice-kicker">Đang có phiên làm việc tạm</p>
+              <h2 id="factory-switch-title">
+                Chuyển sang {pendingFactorySwitch === 'factory1' ? 'Xưởng 1' : 'Xưởng 2'}?
+              </h2>
+              <p>
+                Bạn đang làm dở dữ liệu của {factoryMode === 'factory1' ? 'Xưởng 1' : 'Xưởng 2'}.
+                Nếu tiếp tục, kết quả phân tích tạm và các phần vừa chỉnh sẽ bị xóa để tránh lẫn dữ liệu giữa hai xưởng.
+              </p>
+              <div className="factory-switch-dialog-note">
+                Phiên này chưa được lưu vào lịch sử hoặc Drive nên sẽ không thể khôi phục sau khi xóa.
+              </div>
+            </div>
+            <div className="factory-switch-dialog-actions">
+              <button type="button" className="secondary-button" onClick={() => setPendingFactorySwitch(null)}>
+                Ở lại {factoryMode === 'factory1' ? 'Xưởng 1' : 'Xưởng 2'}
+              </button>
+              <button type="button" className="danger-button" onClick={confirmFactorySwitch}>
+                Xóa phiên tạm và chuyển
+              </button>
+            </div>
           </section>
         </div>
       )}
