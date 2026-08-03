@@ -1910,7 +1910,33 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main className="app-shell" aria-busy={!workspaceHydrated}>
+      {!workspaceHydrated && (
+        <div className="workspace-restore-backdrop" role="presentation">
+          <section
+            className="workspace-restore-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="workspace-restore-title"
+            aria-describedby="workspace-restore-description"
+            tabIndex={0}
+            autoFocus
+            onKeyDown={(event) => event.preventDefault()}
+          >
+            <div className="workspace-restore-spinner" aria-hidden="true">
+              <span />
+            </div>
+            <div className="workspace-restore-copy">
+              <p>Đang mở lại phiên làm việc</p>
+              <h2 id="workspace-restore-title">Đang khôi phục phần bạn làm dở</h2>
+              <span id="workspace-restore-description">
+                App đang tải lại bảng phân tích và các dòng xác nhận chưa hoàn tất. Vui lòng chờ một chút để dữ liệu được mở đầy đủ.
+              </span>
+            </div>
+            <div className="workspace-restore-progress" aria-hidden="true"><i /></div>
+          </section>
+        </div>
+      )}
       <header className="topbar app-header">
         <div className="header-brand">
           <div className="header-logo" aria-hidden="true">
