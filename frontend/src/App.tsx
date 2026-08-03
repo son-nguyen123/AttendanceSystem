@@ -584,7 +584,15 @@ function App() {
         setFactoryMode(workspace.factory)
         setData(workspace.data)
         setReviewSourceSessionId(workspace.data.session_id)
-        setPayrollReviewItems(workspace.review_items ?? [])
+        setPayrollReviewItems(
+          reconcileTemporaryReviewItems(
+            workspace.data,
+            workspace.latest_history_info ?? { period: null, employee_codes: [] },
+            workspace.known_history_codes ?? [],
+            workspace.review_memory ?? null,
+            workspace.review_items ?? [],
+          ),
+        )
         setReviewMemory(workspace.review_memory ?? null)
         setLatestHistoryInfo(workspace.latest_history_info ?? { period: null, employee_codes: [] })
         setKnownHistoryCodes(workspace.known_history_codes ?? [])
@@ -909,6 +917,7 @@ function App() {
       const reviewItems = buildPayrollReviewItems(responseData, latestInfo, knownCodes, memory)
       setReviewMemory(memory)
       setData(responseData)
+      setPayrollReviewItems(reviewItems)
       setReviewSourceSessionId(responseData.session_id)
       setRestoredAnalysisFilename(responseData.filename)
       setPeriodMonth(responseData.period?.month ? String(responseData.period.month) : '')
@@ -5874,6 +5883,29 @@ function buildPayrollReviewItems(
       return items.map((item) => applyReviewMemory(item, history, historyMatchesPunches, historyPeriodLabel))
     }),
   )
+}
+
+function reconcileTemporaryReviewItems(
+  data: AnalyzeResponse,
+  latestHistoryInfo: LatestHistoryInfo,
+  knownHistoryCodes: string[],
+  reviewMemory: ReviewMemory | null,
+  savedItems: PayrollReviewItem[],
+): PayrollReviewItem[] {
+  const derivedItems = buildPayrollReviewItems(data, latestHistoryInfo, knownHistoryCodes, reviewMemory)
+  const savedById = new Map(savedItems.map((item) => [item.id, item]))
+
+  return derivedItems.map((derivedItem) => {
+    const savedItem = savedById.get(derivedItem.id)
+    if (!savedItem) return derivedItem
+    return {
+      ...derivedItem,
+      value: savedItem.value,
+      work_value: savedItem.work_value,
+      status: savedItem.status,
+      pair_selected: savedItem.pair_selected,
+    }
+  })
 }
 
 function applyReviewMemory(
