@@ -3266,6 +3266,7 @@ function AttendanceView({
 }) {
   const [selectedCode, setSelectedCode] = useState(data.blocks[0]?.employee_code ?? '')
   const selectedBlock = data.blocks.find((block) => block.employee_code === selectedCode) ?? data.blocks[0]
+  const firstWorkDays = firstWorkDaysByEmployee(data)
 
   return (
     <>
@@ -3319,6 +3320,7 @@ function AttendanceView({
           id="output1-review"
           title="Kiểm tra Output"
           items={reviewItems}
+          firstWorkDays={firstWorkDays}
           onChange={onReviewItemsChange}
         />
 
@@ -3568,6 +3570,7 @@ function PayrollView({
     isSamePeriod(filterYear, filterMonth, attendanceData.period),
   )
   const sortedEmployees = sortEmployeesForEntry(monthEmployees)
+  const firstWorkDays = firstWorkDaysByEmployee(attendanceData)
   const enteredCount = sortedEmployees.filter(isEmployeeProfileEntered).length
   const missingCount = sortedEmployees.length - enteredCount
   const latestCodeSet = new Set(latestHistoryInfo.employee_codes)
@@ -3669,7 +3672,7 @@ function PayrollView({
         onSelect={onSelect}
       />
 
-      <PayrollReviewPanel items={reviewItems} onChange={onReviewItemsChange} />
+      <PayrollReviewPanel items={reviewItems} firstWorkDays={firstWorkDays} onChange={onReviewItemsChange} />
 
       <BulkPayrollSection
         id="bonus-entry"
@@ -3703,15 +3706,28 @@ function reviewPairKey(item: Pick<PayrollReviewItem, 'employee_code' | 'day'>) {
   return `${item.employee_code}:${item.day}`
 }
 
+function firstWorkDaysByEmployee(data: AnalyzeResponse): Record<string, number> {
+  return data.blocks.reduce<Record<string, number>>((days, block) => {
+    const firstDay = block.results.reduce<number | null>((minimum, result) => {
+      if (!result.punches.length) return minimum
+      return minimum === null ? result.day : Math.min(minimum, result.day)
+    }, null)
+    if (firstDay !== null) days[block.employee_code] = firstDay
+    return days
+  }, {})
+}
+
 function PayrollReviewPanel({
   id = 'payroll-review',
   title = 'Kiểm tra Output',
   items,
+  firstWorkDays,
   onChange,
 }: {
   id?: string
   title?: string
   items: PayrollReviewItem[]
+  firstWorkDays: Record<string, number>
   onChange: (items: PayrollReviewItem[]) => void
 }) {
   const [viewMode, setViewMode] = useState<'pending' | 'history' | 'all'>('pending')
@@ -3859,6 +3875,7 @@ function PayrollReviewPanel({
           items={missingItems}
           pairedReviewKeys={pairedReviewKeys}
           pairedLocks={pairedLocks}
+          firstWorkDays={firstWorkDays}
           onConfirm={confirmItem}
           onEdit={editItem}
           onUpdate={updateItem}
@@ -3869,6 +3886,7 @@ function PayrollReviewPanel({
           items={lateItems}
           pairedReviewKeys={pairedReviewKeys}
           pairedLocks={pairedLocks}
+          firstWorkDays={firstWorkDays}
           onConfirm={confirmItem}
           onEdit={editItem}
           onUpdate={updateItem}
@@ -3879,6 +3897,7 @@ function PayrollReviewPanel({
           items={ruleChangeItems}
           pairedReviewKeys={pairedReviewKeys}
           pairedLocks={pairedLocks}
+          firstWorkDays={firstWorkDays}
           onConfirm={confirmItem}
           onEdit={editItem}
           onUpdate={updateItem}
@@ -4121,6 +4140,7 @@ function ReviewTable({
   items,
   pairedReviewKeys,
   pairedLocks,
+  firstWorkDays,
   onConfirm,
   onEdit,
   onUpdate,
@@ -4130,6 +4150,7 @@ function ReviewTable({
   items: PayrollReviewItem[]
   pairedReviewKeys: Set<string>
   pairedLocks: Record<string, PayrollReviewType>
+  firstWorkDays: Record<string, number>
   onConfirm: (id: string) => void
   onEdit: (id: string) => void
   onUpdate: (id: string, patch: Partial<Pick<PayrollReviewItem, 'value' | 'work_value'>>) => void
@@ -4157,6 +4178,7 @@ function ReviewTable({
             {items.map((item) => {
               const pairKey = reviewPairKey(item)
               const isPairedReview = pairedReviewKeys.has(pairKey)
+              const isFirstWorkDayReview = item.status === 'pending' && item.novelty === 'first-time' && (item.type === 'missing' || item.type === 'late') && firstWorkDays[item.employee_code] === item.day
               const lockedByOtherSide = pairedReviewKeys.has(pairKey) && Boolean(pairedLocks[pairKey]) && pairedLocks[pairKey] !== item.type
               return (
               <tr
@@ -4170,7 +4192,18 @@ function ReviewTable({
                 title={isPairedReview ? 'Cặp trùng công: dòng trễ và dòng chưa rõ được xếp song song để kiểm tra.' : undefined}
               >
                 <td>{item.employee_code}</td>
-                <td>{item.day}</td>
+                <td>
+                  <span className="review-day-value">{item.day}</span>
+                  {isFirstWorkDayReview && (
+                    <span
+                      className="review-first-day-mark"
+                      title="Mã mới · đây là ngày đầu tiên có dữ liệu trong tháng · nên kiểm tra/chấm tay"
+                      aria-label="Mã mới, ngày đầu tiên có dữ liệu trong tháng"
+                    >
+                      ✦
+                    </span>
+                  )}
+                </td>
                 <td>
                   <span className="review-punch-list">
                     {item.punches.map((punch) => <span key={punch}>{punch}</span>)}

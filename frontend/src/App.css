@@ -2365,6 +2365,27 @@ button:disabled {
   line-height: 1.45;
 }
 
+.review-day-value {
+  vertical-align: middle;
+}
+
+.review-first-day-mark {
+  display: inline-grid;
+  width: 14px;
+  height: 14px;
+  margin-left: 3px;
+  place-items: center;
+  vertical-align: middle;
+  border-radius: 50%;
+  color: #ffffff;
+  background: #d39d2f;
+  font-size: 9px;
+  font-weight: 900;
+  line-height: 1;
+  cursor: help;
+  box-shadow: 0 0 0 2px rgba(211, 157, 47, 0.15);
+}
+
 .review-punch-list {
   display: grid;
   gap: 1px;
