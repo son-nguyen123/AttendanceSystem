@@ -15,6 +15,7 @@ from app.services.data_mapper import (
     _prepare_mapping_source_workbook,
     _write_monthly_grand_total,
     _write_reformed_owner_area,
+    inspect_bank_accounts_for_mapping,
     map_owner_data_to_current_workbook,
 )
 from app.services import bank_account_store
@@ -58,6 +59,42 @@ class DataMapperCompactionTests(unittest.TestCase):
 
             self.assertEqual(prepared, source)
             self.assertEqual(ignored_rows, 0)
+
+    def test_bank_preflight_compacts_inflated_source_before_loading(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            current = root / "current.xlsx"
+            previous = root / "previous.xlsx"
+
+            current_workbook = Workbook()
+            current_sheet = current_workbook.active
+            current_sheet["AF4"] = "Tổng giờ công"
+            current_sheet["AH4"] = "Mã"
+            current_sheet["AH9"] = "1006"
+            current_workbook.save(current)
+            current_workbook.close()
+
+            previous_workbook = Workbook()
+            previous_sheet = previous_workbook.active
+            previous_sheet["AF4"] = "Tổng giờ công"
+            previous_sheet["AH4"] = "Mã"
+            previous_sheet["AI4"] = "Tên nhân viên / Ghi chú"
+            previous_sheet["AH9"] = "1006"
+            previous_sheet["AI9"] = "Nguyễn Văn A"
+            previous_sheet["A1000"].fill = PatternFill("solid", fgColor="FFFF00")
+            previous_workbook.save(previous)
+            previous_workbook.close()
+
+            original_registry_path = bank_account_store.REGISTRY_PATH
+            bank_account_store.REGISTRY_PATH = root / "bank_accounts.json"
+            try:
+                result = inspect_bank_accounts_for_mapping(current, previous)
+            finally:
+                bank_account_store.REGISTRY_PATH = original_registry_path
+
+            self.assertEqual(result["current_count"], 1)
+            self.assertEqual(result["ignored_trailing_style_rows"], 1)
+            self.assertEqual(result["missing_bank_accounts"][0]["employee_code"], "1006")
 
 
 class DataMapperNumberFormatTests(unittest.TestCase):

@@ -38,7 +38,7 @@ class EmployeeExcelScreenshotTests(unittest.TestCase):
             with patch("app.services.employee_cards._run_excel_range_export", side_effect=fake_excel_export):
                 export_employee_screenshots_from_workbook(workbook_path, output_path, "output1")
 
-            self.assertEqual([job["range"] for job in captured_jobs], ["A3:AJ10", "A11:AJ18"])
+            self.assertEqual([job["range"] for job in captured_jobs], ["A3:AI10", "A11:AI18"])
             with zipfile.ZipFile(output_path) as archive:
                 self.assertEqual(len(archive.namelist()), 2)
                 self.assertTrue(all(name.endswith(".png") for name in archive.namelist()))

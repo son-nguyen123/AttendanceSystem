@@ -82,8 +82,8 @@ def export_employee_screenshots_from_workbook(
             raise ValueError("Không tìm thấy khung bảng công nhân viên trong file Excel")
         period = detect_period_from_sheet(worksheet)
         period_label = _period_label(period)
-        final_column = 44 if kind == "output2" else 36
-        name_column = 35 if kind == "output2" else 34
+        final_column = 44 if kind == "output2" else 35
+        name_column = 35
         jobs: list[dict[str, str]] = []
         used_filenames: set[str] = set()
         for index, block in enumerate(blocks, start=1):

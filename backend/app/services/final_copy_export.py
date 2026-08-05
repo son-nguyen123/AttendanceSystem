@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unicodedata
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from openpyxl import load_workbook
 from openpyxl.styles import Border, Font, PatternFill
@@ -22,19 +23,29 @@ PRIVATE_TAIL_LABELS = {
 
 
 def export_final_copy_output1(source_path: Path, output_path: Path) -> Path:
-    keep_vba = source_path.suffix.lower() == ".xlsm"
-    workbook = load_workbook(source_path, data_only=False, keep_vba=keep_vba)
-    try:
-        for worksheet in workbook.worksheets:
-            _strip_private_tail(worksheet)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        workbook.save(output_path)
-        return output_path
-    finally:
-        workbook.close()
+    # Final copies may contain huge style-only tails. Compact a temporary read
+    # copy first so exporting Output 1 remains responsive.
+    from app.services.data_mapper import _prepare_mapping_source_workbook
+
+    with TemporaryDirectory(prefix="attendance-final-output1-") as temp_dir:
+        prepared_path, _ = _prepare_mapping_source_workbook(source_path, Path(temp_dir))
+        keep_vba = prepared_path.suffix.lower() == ".xlsm"
+        workbook = load_workbook(prepared_path, data_only=False, keep_vba=keep_vba)
+        try:
+            for worksheet in workbook.worksheets:
+                if not _strip_private_tail(worksheet):
+                    continue
+                _truncate_after_column(worksheet, 35)
+                worksheet.print_area = f"A1:AI{worksheet.max_row}"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            workbook.save(output_path)
+            return output_path
+        finally:
+            workbook.close()
 
 
-def _strip_private_tail(ws) -> None:
+def _strip_private_tail(ws) -> bool:
+    found = False
     for header_row in range(1, ws.max_row + 1):
         total_col = _find_label_col(ws, header_row, SUMMARY_MIN_COL, ws.max_column, TOTAL_LABELS)
         if not total_col:
@@ -50,6 +61,8 @@ def _strip_private_tail(ws) -> None:
         if tail_start <= name_col or tail_start > ws.max_column:
             continue
         _clear_area(ws, header_row, tail_start, header_row + SUMMARY_ROWS - 1, ws.max_column)
+        found = True
+    return found
 
 
 def _find_private_tail_start(ws, row: int, start_col: int) -> int | None:
@@ -96,6 +109,25 @@ def _unmerge_overlapping(ws, min_row: int, min_col: int, max_row: int, max_col: 
             or merged.min_col > max_col
         ):
             ws.unmerge_cells(str(merged))
+
+
+def _truncate_after_column(ws, end_col: int) -> None:
+    for merged in list(ws.merged_cells.ranges):
+        if merged.max_col <= end_col:
+            continue
+        min_row = merged.min_row
+        min_col = merged.min_col
+        max_row = merged.max_row
+        ws.unmerge_cells(str(merged))
+        if min_col <= end_col:
+            ws.merge_cells(
+                start_row=min_row,
+                start_column=min_col,
+                end_row=max_row,
+                end_column=end_col,
+            )
+    if ws.max_column > end_col:
+        ws.delete_cols(end_col + 1, ws.max_column - end_col)
 
 
 def _normalize_label(value: object) -> str:

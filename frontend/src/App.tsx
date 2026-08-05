@@ -689,13 +689,13 @@ function App() {
             restoredData = { ...workspace.data, ...refreshedResponse.data }
           }
 
-          let employees = cachedEmployees
-          if (!employees.length || workspaceNeedsRecalculation) {
-            const response = await axios.get<{ employees: PayrollEmployee[] }>(`${API_BASE}/payroll/employees`, {
-              params: { session_id: restoredData.session_id },
-            })
-            employees = response.data.employees
-          }
+          // Employee/profile data can change independently after a final copy
+          // is saved. Always refresh it when restoring a temporary session;
+          // the cached list is only for the first paint while the API loads.
+          const response = await axios.get<{ employees: PayrollEmployee[] }>(`${API_BASE}/payroll/employees`, {
+            params: { session_id: restoredData.session_id },
+          })
+          const employees = response.data.employees
           if (cancelled) return
 
           const selectedEmployee =

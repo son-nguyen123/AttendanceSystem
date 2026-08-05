@@ -10,6 +10,7 @@ from openpyxl.utils import get_column_letter
 from app.models.attendance import DayComputation
 from app.services.attendance_calculator import calculate_day
 from app.services.block_detector import detect_employee_blocks
+from app.services.bank_account_store import get_saved_account_number
 from app.services.payroll_store import get_payroll_entry
 from app.services.period_detector import detect_period_from_sheet
 from app.services.punch_parser import parse_punches
@@ -131,7 +132,12 @@ def export_processed_workbook(
             )
         _write_output1_summary_block(ws, block, factory=factory)
 
-    _format_title_area(ws, 36)
+    # Output 1 intentionally stops after the public employee information
+    # columns: Tổng giờ, mức phạt NQ/giờ, Mã, Tên/Ghi chú (A:AI).
+    _format_title_area(ws, 35)
+    _truncate_after_column(ws, 35)
+    if blocks:
+        ws.print_area = f"A1:AI{max(block.header_row + 7 for block in blocks)}"
     wb.save(output_path)
     return output_path
 
@@ -146,25 +152,26 @@ def _write_output1_summary_block(ws, block, factory: str = "factory1") -> None:
 
     headers = {
         32: "Tổng giờ công",
-        33: "Mã",
-        34: "Tên nhân viên / Ghi chú",
+        33: "Mức tiền phạt NQ trên giờ công (đ)",
+        34: "Mã",
+        35: "Tên nhân viên / Ghi chú",
     }
 
     _clear_output1_summary_area(ws, h, note_row)
     ws.row_dimensions[day_row].height = max(float(ws.row_dimensions[day_row].height or 0), 28)
 
-    for col in range(32, 37):
+    for col in range(32, 36):
         for row in range(day_row, note_row + 1):
             cell = ws.cell(row=row, column=col)
             cell.border = _thin_border()
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            cell.fill = PatternFill("solid", fgColor=YELLOW)
+            cell.fill = PatternFill("solid", fgColor=WHITE if col <= 33 else YELLOW)
 
     for col, title in headers.items():
         cell = ws.cell(row=day_row, column=col)
         cell.value = title
-        cell.fill = PatternFill("solid", fgColor=YELLOW)
-        cell.font = Font(name=FONT_NAME, bold=True, size=8, color=RED if col == 32 else "000000")
+        cell.fill = PatternFill("solid", fgColor=WHITE if col <= 33 else YELLOW)
+        cell.font = Font(name=FONT_NAME, bold=True, size=8, color=RED if col in {32, 33, 34} else "000000")
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True, shrink_to_fit=True)
 
     total_cell = ws.cell(row=result_row, column=32)
@@ -172,23 +179,29 @@ def _write_output1_summary_block(ws, block, factory: str = "factory1") -> None:
     total_cell.font = Font(name=FONT_NAME, bold=True, size=10, color=RED)
     total_cell.number_format = _number_format_for(total_cell.value)
 
-    code_cell = ws.cell(row=result_row, column=33)
+    penalty_rate_cell = ws.cell(row=result_row, column=33)
+    penalty_rate_cell.value = None
+    penalty_rate_cell.font = Font(name=FONT_NAME, bold=True, size=10, color=RED)
+
+    code_cell = ws.cell(row=result_row, column=34)
     code_cell.value = block.employee_code
     code_cell.font = Font(name=FONT_NAME, bold=True, size=10, color="000000")
 
-    name_cell = ws.cell(row=result_row, column=34)
+    name_cell = ws.cell(row=result_row, column=35)
     name_cell.value = entry.name
     name_cell.font = Font(name=FONT_NAME, bold=True, size=10)
     name_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True, shrink_to_fit=True)
 
+    bank_account_cell = ws.cell(row=result_row - 1, column=35)
+    bank_account_cell.value = get_saved_account_number(factory, block.employee_code)
+    bank_account_cell.number_format = "@"
+    bank_account_cell.alignment = Alignment(horizontal="left", vertical="center")
+
     start_work_note = _format_start_work_note(entry.start_work_note)
-    start_work_cell = ws.cell(row=note_row, column=34)
+    start_work_cell = ws.cell(row=note_row, column=35)
     start_work_cell.value = start_work_note
     start_work_cell.font = Font(name=FONT_NAME, bold=True, size=10)
     start_work_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True, shrink_to_fit=True)
-
-    for row in range(day_row, note_row + 1):
-        _safe_merge(ws, row, 34, row, 36)
     _set_output1_summary_column_widths(ws)
 
 
@@ -236,9 +249,9 @@ def _write_employee_info_line(ws, block, factory: str = "factory1") -> None:
 
 
 def _clear_output1_summary_area(ws, start_row: int, end_row: int) -> None:
-    _unmerge_overlapping(ws, start_row, 32, end_row, 36)
+    _unmerge_overlapping(ws, start_row, 32, end_row, 35)
     for row in range(start_row, end_row + 1):
-        for col in range(32, 37):
+        for col in range(32, 36):
             cell = ws.cell(row=row, column=col)
             cell.value = None
             cell.border = Border()
@@ -293,6 +306,26 @@ def _unmerge_overlapping(ws, start_row: int, start_col: int, end_row: int, end_c
             ws.unmerge_cells(str(merged_range))
 
 
+def _truncate_after_column(ws, end_col: int) -> None:
+    """Physically remove private columns and shrink merges crossing the cut."""
+    for merged_range in list(ws.merged_cells.ranges):
+        if merged_range.max_col <= end_col:
+            continue
+        min_row = merged_range.min_row
+        min_col = merged_range.min_col
+        max_row = merged_range.max_row
+        ws.unmerge_cells(str(merged_range))
+        if min_col <= end_col:
+            ws.merge_cells(
+                start_row=min_row,
+                start_column=min_col,
+                end_row=max_row,
+                end_column=end_col,
+            )
+    if ws.max_column > end_col:
+        ws.delete_cols(end_col + 1, ws.max_column - end_col)
+
+
 def _ranges_overlap(merged_range, start_row: int, start_col: int, end_row: int, end_col: int) -> bool:
     return not (
         merged_range.max_row < start_row
@@ -310,10 +343,9 @@ def _thin_border() -> Border:
 def _set_output1_summary_column_widths(ws) -> None:
     widths = {
         "AF": 12,
-        "AG": 8,
-        "AH": 15,
-        "AI": 15,
-        "AJ": 15,
+        "AG": 24,
+        "AH": 8,
+        "AI": 28,
     }
     for column, width in widths.items():
         ws.column_dimensions[column].width = width

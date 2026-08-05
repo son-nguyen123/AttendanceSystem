@@ -93,10 +93,26 @@ def inspect_bank_accounts_for_mapping(
     """
     from app.services.bank_account_store import get_saved_account_number, normalize_account_number
 
-    current_wb = load_workbook(current_path, data_only=False)
-    previous_wb = load_workbook(previous_path, data_only=False)
-    previous_values_wb = load_workbook(previous_path, data_only=True)
-    try:
+    # Use the same compaction as the real mapping. Owner-edited workbooks can
+    # retain tens of thousands of style-only rows; loading that inflated sheet
+    # twice here otherwise leaves the UI stuck at "Đang gán" before mapping.
+    with TemporaryDirectory(prefix="attendance-owner-inspect-") as temp_dir, ExitStack() as stack:
+        temp_root = Path(temp_dir)
+        prepared_current_path, ignored_current_rows = _prepare_mapping_source_workbook(
+            current_path,
+            temp_root / "current",
+        )
+        prepared_previous_path, ignored_previous_rows = _prepare_mapping_source_workbook(
+            previous_path,
+            temp_root / "previous",
+        )
+        current_wb = load_workbook(prepared_current_path, data_only=False)
+        stack.callback(current_wb.close)
+        previous_wb = load_workbook(prepared_previous_path, data_only=False)
+        stack.callback(previous_wb.close)
+        previous_values_wb = load_workbook(prepared_previous_path, data_only=True)
+        stack.callback(previous_values_wb.close)
+
         current_ws = current_wb.active
         previous_ws = previous_wb.active
         previous_values_ws = previous_values_wb[previous_ws.title]
@@ -114,10 +130,9 @@ def inspect_bank_accounts_for_mapping(
                 (previous_records.get(code).bank_account if previous_records.get(code) else "")
             )
             source_name = str(previous_records.get(code).name or "").strip() if previous_records.get(code) else ""
-            name = source_name
             item = {
                 "employee_code": code,
-                "name": name,
+                "name": source_name,
                 "saved_account": saved,
                 "candidate_account": candidate,
             }
@@ -133,11 +148,8 @@ def inspect_bank_accounts_for_mapping(
             "changed_bank_accounts": changed,
             "missing_count": len(missing),
             "changed_count": len(changed),
+            "ignored_trailing_style_rows": ignored_current_rows + ignored_previous_rows,
         }
-    finally:
-        current_wb.close()
-        previous_wb.close()
-        previous_values_wb.close()
 
 
 def map_owner_data_to_current_workbook(
