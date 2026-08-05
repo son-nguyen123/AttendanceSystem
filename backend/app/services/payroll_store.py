@@ -1,6 +1,8 @@
 import json
+import os
 from datetime import datetime
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -57,8 +59,7 @@ def save_payroll_data(data: dict[str, dict], factory: str = "factory1") -> None:
     existing = _read_json_dict(PAYROLL_DATA_PATH)
     partitioned = _partitioned_data(existing)
     partitioned[normalize_factory(factory)] = data
-    with PAYROLL_DATA_PATH.open("w", encoding="utf-8") as file:
-        json.dump(partitioned, file, ensure_ascii=False, indent=2)
+    _write_json_atomic(PAYROLL_DATA_PATH, partitioned)
 
 
 def get_payroll_entry(employee_code: str, factory: str = "factory1") -> PayrollEntry:
@@ -243,8 +244,30 @@ def _save_profile_sources(sources: dict[str, dict[str, dict[str, Any]]], factory
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     partitioned = _partitioned_data(_read_json_dict(PAYROLL_PROFILE_SOURCES_PATH))
     partitioned[normalize_factory(factory)] = sources
-    with PAYROLL_PROFILE_SOURCES_PATH.open("w", encoding="utf-8") as file:
-        json.dump(partitioned, file, ensure_ascii=False, indent=2)
+    _write_json_atomic(PAYROLL_PROFILE_SOURCES_PATH, partitioned)
+
+
+def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+    """Never expose a partially rewritten profile JSON file to API readers."""
+    temporary_path: Path | None = None
+    try:
+        with NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            json.dump(data, temporary_file, ensure_ascii=False, indent=2)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+            temporary_path = Path(temporary_file.name)
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _read_json_dict(path: Path) -> dict[str, Any]:
