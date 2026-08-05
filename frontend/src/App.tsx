@@ -1653,6 +1653,7 @@ function App() {
       setHistorySelectedCode(response.data.employees[0]?.employee_code ?? '')
       setActiveView('history')
       await loadEmployeeRegistry()
+      if (data) await refreshPayroll(data.session_id, false)
       setKnownHistoryCodes(await fetchKnownHistoryCodes())
       await loadHistoryPeriods()
       setMessage(`Đã lưu lịch sử ${response.data.period.label}`)
@@ -1898,6 +1899,7 @@ function App() {
       const response = await axios.post<{ path: string; folder: string; profile_sync?: ProfileSyncSummary }>(`${API_BASE}/cloud/final-copy`, uploadForm)
       await loadCloudConfig()
       await loadEmployeeRegistry(selectedCode)
+      if (data) await refreshPayroll(data.session_id, true)
       await loadHistoryPeriods(historyFilters)
       setMessage(
         profileSyncMode === 'keep_manual'
