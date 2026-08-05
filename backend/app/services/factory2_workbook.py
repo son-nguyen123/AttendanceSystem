@@ -491,12 +491,14 @@ def _build_employee_preview(
     daily_salary = calculate_daily_salary(entry)
     hourly_salary = calculate_hourly_salary(entry)
     work_days = total_hours / 8
-    final_salary = total_hours * hourly_salary + entry.bonus - entry.advance_or_penalty
+    final_salary = total_hours * hourly_salary + entry.bonus
+    from app.services.bank_account_store import get_saved_account_number
     fallback_name = employee.source_name if employee.source_name != employee.employee_code else ""
 
     return {
         "employee_code": employee.employee_code,
         "name": entry.name or fallback_name,
+        "bank_account": get_saved_account_number(factory, employee.employee_code),
         "start_work_note": entry.start_work_note,
         "note": entry.note,
         "header_row": None,
@@ -510,7 +512,7 @@ def _build_employee_preview(
         "standard_work_days": entry.standard_work_days,
         "work_days": _round_number(work_days),
         "bonus": entry.bonus,
-        "advance_or_penalty": entry.advance_or_penalty,
+        "advance_or_penalty": None,
         "final_salary": _round_number(final_salary),
     }
 

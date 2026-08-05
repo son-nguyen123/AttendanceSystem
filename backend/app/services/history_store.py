@@ -411,10 +411,18 @@ def update_employee_monthly_record(period_id: str, employee_code: str, updates: 
         ).fetchall()
         total_hours = sum(_num(row["work_value"]) for row in daily_rows)
         work_days = total_hours / 8 if total_hours else 0
-        hourly_salary = _num(updates.get("hourly_salary"), _num(existing["hourly_salary"]))
-        daily_salary = hourly_salary * 8 if hourly_salary else _num(existing["daily_salary"])
+        # Keep history aligned with the new Output 2 layout: monthly salary is
+        # primary, with daily/hourly values derived from it. Legacy hourly-only
+        # rows remain readable as a fallback.
+        monthly_salary = _num(updates.get("monthly_salary"), _num(existing["monthly_salary"]))
+        if monthly_salary:
+            daily_salary = monthly_salary / 26
+            hourly_salary = monthly_salary / 208
+        else:
+            hourly_salary = _num(updates.get("hourly_salary"), _num(existing["hourly_salary"]))
+            daily_salary = hourly_salary * 8 if hourly_salary else _num(existing["daily_salary"])
+            monthly_salary = daily_salary * 26 if daily_salary else 0
         standard_work_days = 26
-        monthly_salary = daily_salary * standard_work_days if daily_salary else _num(existing["monthly_salary"])
         bonus = _num(updates.get("bonus"), _num(existing["bonus"]))
         advance_or_penalty = _num(updates.get("advance_or_penalty"), _num(existing["advance_or_penalty"]))
         final_salary = total_hours * hourly_salary + bonus - advance_or_penalty

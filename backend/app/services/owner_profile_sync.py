@@ -13,7 +13,7 @@ from app.services.payroll_store import merge_payroll_profile_updates, normalize_
 SUMMARY_MIN_COL = 32
 
 
-def sync_latest_final_copy_profile(source_path: Path, factory: str) -> dict[str, Any]:
+def sync_latest_final_copy_profile(source_path: Path | None, factory: str) -> dict[str, Any]:
     """Refresh from the newest final copy without replacing manual entries."""
     try:
         # Imported lazily to avoid a cloud/profile import cycle at startup.
@@ -23,8 +23,13 @@ def sync_latest_final_copy_profile(source_path: Path, factory: str) -> dict[str,
         if not copies:
             return _empty_result("", "no_final_copy")
 
-        period = detect_period_from_workbook(source_path)
-        current_key = (int(period.get("year") or 0), int(period.get("month") or 0))
+        if source_path is None:
+            # The employee registry has no current attendance workbook. In
+            # that view the newest saved final copy is the correct baseline.
+            current_key = (0, 0)
+        else:
+            period = detect_period_from_workbook(source_path)
+            current_key = (int(period.get("year") or 0), int(period.get("month") or 0))
         eligible = [
             item
             for item in copies

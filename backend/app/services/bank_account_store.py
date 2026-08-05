@@ -28,6 +28,7 @@ def sync_accounts_from_final_copy(factory: str, profiles: dict[str, dict[str, An
     normalized_factory = _factory(factory)
     registry = _load_registry()
     updated_codes: list[str] = []
+    conflict_codes: list[str] = []
     for raw_code, profile in profiles.items():
         code = _employee_code(raw_code)
         if not code or not isinstance(profile, dict):
@@ -37,6 +38,13 @@ def sync_accounts_from_final_copy(factory: str, profiles: dict[str, dict[str, An
             continue
         key = _key(normalized_factory, code)
         current = registry.get(key, {}) if isinstance(registry.get(key), dict) else {}
+        current_account = normalize_account_number(current.get("account_number"))
+        if current_account and current_account != account:
+            # A final copy can be stale or contain a typo. Never overwrite a
+            # trusted registry value during background profile refresh; the
+            # explicit bank/mapping conflict dialog is the place to decide.
+            conflict_codes.append(code)
+            continue
         next_value = {
             **current,
             "factory": normalized_factory,
@@ -52,7 +60,13 @@ def sync_accounts_from_final_copy(factory: str, profiles: dict[str, dict[str, An
         updated_codes.append(code)
     if updated_codes:
         _atomic_json(REGISTRY_PATH, registry)
-    return {"status": "ok", "updated": len(updated_codes), "updated_codes": updated_codes}
+    return {
+        "status": "ok",
+        "updated": len(updated_codes),
+        "updated_codes": updated_codes,
+        "conflict_count": len(conflict_codes),
+        "conflict_codes": conflict_codes,
+    }
 
 
 def list_account_overview(factory: str) -> dict[str, Any]:

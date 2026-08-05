@@ -105,6 +105,7 @@ type PeriodInfo = {
 type PayrollEmployee = {
   employee_code: string
   name: string
+  bank_account?: string
   start_work_note: string
   note: string
   total_hours: number
@@ -527,6 +528,9 @@ function App() {
   const [mappingBankInspection, setMappingBankInspection] = useState<MappingBankInspection | null>(null)
   const [mappingBankDecisions, setMappingBankDecisions] = useState<Record<string, MappingBankDecision>>({})
   const [mappingAllowMissingBankAccounts, setMappingAllowMissingBankAccounts] = useState(false)
+  const [output2BankMissing, setOutput2BankMissing] = useState<PayrollEmployee[]>([])
+  const [output2BankAccounts, setOutput2BankAccounts] = useState<Record<string, string>>({})
+  const [output2AllowMissingBankAccounts, setOutput2AllowMissingBankAccounts] = useState(false)
   const [pendingFactorySwitch, setPendingFactorySwitch] = useState<FactoryMode | null>(null)
   const [smartSettingsOpen, setSmartSettingsOpen] = useState(false)
   const [supportOpen, setSupportOpen] = useState(false)
@@ -1492,9 +1496,8 @@ function App() {
     setOutput2ChoiceOpen(true)
   }
 
-  async function runOutput2Export(includeSavedData: boolean) {
+  async function exportOutput2File(includeSavedData: boolean) {
     if (!data) return
-    setOutput2ChoiceOpen(false)
     setPayrollLoading(true)
     setError(null)
     setMessage(null)
@@ -1502,7 +1505,67 @@ function App() {
       const response = await axios.post(
         `${API_BASE}/payroll/export-output-2`,
         {
-          session_id: data.session_id,
+          session_id: data!.session_id,
+          review_overrides: buildReviewOverrides(payrollReviewItems),
+          include_saved_data: includeSavedData,
+        },
+        { responseType: 'blob' },
+      )
+      downloadBlob(
+        response.data,
+        readablePeriodExportFilename(data!.factory ?? factoryMode, data!.period, 'Output2', 'xlsx'),
+      )
+      setMessage(
+        data!.missing_output1_summary
+          ? `Đã xuất Output 2 ${includeSavedData ? 'có dữ liệu đã lưu' : 'chỉ giữ công thức'} và bổ sung vùng cột công/lương bên phải.`
+          : `Đã xuất Output 2 ${includeSavedData ? 'có dữ liệu đã lưu' : 'chỉ giữ công thức'}.`,
+      )
+    } catch (err) {
+      setError(readAxiosError(err, 'Không xuất được Output 2'))
+    } finally {
+      setPayrollLoading(false)
+    }
+  }
+
+  async function runOutput2Export(includeSavedData: boolean) {
+    if (!data) return
+    if (includeSavedData && !output2AllowMissingBankAccounts) {
+      setPayrollLoading(true)
+      try {
+        // Check the exact current employee list before exporting. New codes
+        // without a bank account must be confirmed in a modal first.
+        const preview = await axios.get<{ employees: PayrollEmployee[] }>(`${API_BASE}/payroll/employees`, {
+          params: { session_id: data.session_id },
+        })
+        const missing = preview.data.employees.filter(
+          (employee) => Number(employee.total_hours || 0) > 0 && !String(employee.bank_account || '').trim(),
+        )
+        if (missing.length) {
+          setOutput2BankMissing(missing)
+          setOutput2BankAccounts(Object.fromEntries(missing.map((employee) => [employee.employee_code, ''])))
+          setOutput2AllowMissingBankAccounts(false)
+          setPayrollLoading(false)
+          setOutput2ChoiceOpen(false)
+          return
+        }
+      } catch (err) {
+        setError(readAxiosError(err, 'Không kiểm tra được tài khoản ngân hàng trước khi xuất Output 2'))
+        setPayrollLoading(false)
+        return
+      }
+      setPayrollLoading(false)
+    }
+    setOutput2ChoiceOpen(false)
+    await exportOutput2File(includeSavedData)
+    return
+    setPayrollLoading(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const response = await axios.post(
+        `${API_BASE}/payroll/export-output-2`,
+        {
+          session_id: data!.session_id,
           review_overrides: buildReviewOverrides(payrollReviewItems),
           include_saved_data: includeSavedData,
         },
@@ -1512,10 +1575,10 @@ function App() {
       )
       downloadBlob(
         response.data,
-        readablePeriodExportFilename(data.factory ?? factoryMode, data.period, 'Output2', 'xlsx'),
+        readablePeriodExportFilename(data!.factory ?? factoryMode, data!.period, 'Output2', 'xlsx'),
       )
       setMessage(
-        data.missing_output1_summary
+        data!.missing_output1_summary
           ? `Đã xuất Output 2 ${includeSavedData ? 'có dữ liệu đã lưu' : 'chỉ giữ công thức'} và bổ sung vùng cột công/lương bên phải.`
           : `Đã xuất Output 2 ${includeSavedData ? 'có dữ liệu đã lưu' : 'chỉ giữ công thức'}.`,
       )
@@ -1523,6 +1586,44 @@ function App() {
       setError(readAxiosError(err, 'Không xuất được Output 2'))
     } finally {
       setPayrollLoading(false)
+    }
+  }
+
+  async function confirmOutput2BankAccounts() {
+    if (!data || !output2BankMissing.length) return
+    const accounts = output2BankMissing.map((employee) => ({
+      employee_code: employee.employee_code,
+      name: employee.name || '',
+      account_number: (output2BankAccounts[employee.employee_code] || '').replace(/\D/g, ''),
+    }))
+    const unresolved = accounts.filter((row) => !/^\d{8,20}$/.test(row.account_number))
+    if (unresolved.length && !output2AllowMissingBankAccounts) {
+      setError(`Còn ${unresolved.length} mã thiếu số tài khoản. Hãy nhập đủ 8–20 chữ số hoặc bật cho phép xuất tạm.`)
+      return
+    }
+    setPayrollLoading(true)
+    setError(null)
+    try {
+      const confirmed = accounts.filter((row) => /^\d{8,20}$/.test(row.account_number))
+      if (confirmed.length) {
+        await axios.post(`${API_BASE}/bank/accounts`, {
+          factory: data.factory ?? factoryMode,
+          accounts: confirmed,
+        })
+        try {
+          await axios.post(`${API_BASE}/bank/backup-drive`, { factory: data.factory ?? factoryMode })
+        } catch {
+          // Local registry is saved even when Drive is not configured.
+        }
+      }
+      setOutput2BankMissing([])
+      setOutput2BankAccounts({})
+      setPayrollLoading(false)
+      await runOutput2Export(true)
+      setOutput2AllowMissingBankAccounts(false)
+    } catch (err) {
+      setPayrollLoading(false)
+      setError(readAxiosError(err, 'Không lưu được số tài khoản ngân hàng'))
     }
   }
 
@@ -2842,6 +2943,61 @@ function App() {
               </button>
               <button type="button" className="danger-button" onClick={confirmFactorySwitch}>
                 Xóa phiên tạm và chuyển
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {output2BankMissing.length > 0 && (
+        <div className="export-choice-backdrop" role="presentation" onMouseDown={() => { setOutput2BankMissing([]); setOutput2AllowMissingBankAccounts(false) }}>
+          <section
+            className="export-choice-dialog mapping-bank-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="output2-bank-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <p className="export-choice-kicker">KIỂM TRA TÀI KHOẢN TRƯỚC KHI XUẤT</p>
+            <h2 id="output2-bank-title">Phát hiện mã nhân viên chưa có số ngân hàng</h2>
+            <p className="export-choice-description">
+              Đây là các mã có giờ công trong tháng hiện tại nhưng kho Ngân hàng chưa có tài khoản. Nhập số tại đây để lưu vào kho dùng cho các tháng sau.
+            </p>
+            <div className="mapping-bank-section">
+              <div className="mapping-bank-list">
+                {output2BankMissing.map((employee) => (
+                  <div className="mapping-bank-row" key={`output2-missing-${employee.employee_code}`}>
+                    <div><strong>{employee.employee_code}</strong><span>{employee.name || 'Chưa có tên'}</span></div>
+                    <input
+                      className="table-input mapping-bank-input"
+                      inputMode="numeric"
+                      placeholder="Nhập 8–20 chữ số"
+                      value={output2BankAccounts[employee.employee_code] || ''}
+                      onChange={(event) => setOutput2BankAccounts((current) => ({
+                        ...current,
+                        [employee.employee_code]: event.target.value.replace(/\D/g, ''),
+                      }))}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+            <label className="mapping-bank-allow-missing">
+              <input
+                type="checkbox"
+                checked={output2AllowMissingBankAccounts}
+                onChange={(event) => setOutput2AllowMissingBankAccounts(event.target.checked)}
+              />
+              <span>Cho phép xuất tạm, để trống tài khoản chưa nhập</span>
+            </label>
+            <div className="export-choice-options mapping-bank-actions">
+              <button type="button" className="export-choice-card bank-save-choice" disabled={payrollLoading} onClick={() => void confirmOutput2BankAccounts()}>
+                <strong>{payrollLoading ? 'Đang lưu...' : 'Lưu tài khoản và xuất Output 2'}</strong>
+                <span>Số hợp lệ được lưu vào kho Ngân hàng; Drive sẽ được sao lưu nếu đã cài.</span>
+              </button>
+              <button type="button" className="export-choice-card formula-only" disabled={payrollLoading} onClick={() => { setOutput2BankMissing([]); setOutput2AllowMissingBankAccounts(false) }}>
+                <strong>Hủy xuất</strong>
+                <span>Không xuất file và không thay đổi dữ liệu.</span>
               </button>
             </div>
           </section>
@@ -4516,9 +4672,9 @@ function EmployeeRegistryView({
           <Input label="Mã nhân viên" value={form.employee_code} onChange={(value) => onFormChange({ ...form, employee_code: value })} />
           <Input label="Tên nhân viên" value={form.name} onChange={(value) => onFormChange({ ...form, name: value })} />
           <Input label="Bắt đầu làm" value={form.start_work_note} onChange={(value) => onFormChange({ ...form, start_work_note: value })} />
-          <Input label="Mức lương" value={calculatedMonthlySalaryValue(form)} onChange={() => undefined} type="number" readOnly />
+          <Input label="Mức lương tháng" value={form.monthly_salary} onChange={(value) => onFormChange({ ...form, monthly_salary: value })} type="number" />
           <Input label="Lương 1 ngày công" value={calculatedDailySalaryValue(form)} onChange={() => undefined} type="number" readOnly />
-          <Input label="Lương 1 giờ công" value={form.hourly_salary} onChange={(value) => onFormChange({ ...form, hourly_salary: value })} type="number" />
+          <Input label="Lương 1 giờ công" value={calculatedHourlySalaryValue(form)} onChange={() => undefined} type="number" readOnly />
           <label className="field field-wide">
             <span>Ghi chú hồ sơ</span>
             <textarea value={form.note} onChange={(event) => onFormChange({ ...form, note: event.target.value })} />
@@ -4700,9 +4856,9 @@ function PayrollOverview({
         <div className="form-grid">
           <Input label="Tên nhân viên" value={form.name} onChange={(value) => onFormChange({ ...form, name: value })} />
           <Input label="Bắt đầu làm" value={form.start_work_note} onChange={(value) => onFormChange({ ...form, start_work_note: value })} />
-          <Input label="Mức lương" value={calculatedMonthlySalaryValue(form)} onChange={() => undefined} type="number" readOnly />
+          <Input label="Mức lương tháng" value={form.monthly_salary} onChange={(value) => onFormChange({ ...form, monthly_salary: value })} type="number" />
           <Input label="Lương 1 ngày công" value={calculatedDailySalaryValue(form)} onChange={() => undefined} type="number" readOnly />
-          <Input label="Lương 1 giờ công" value={form.hourly_salary} onChange={(value) => onFormChange({ ...form, hourly_salary: value })} type="number" />
+          <Input label="Lương 1 giờ công" value={calculatedHourlySalaryValue(form)} onChange={() => undefined} type="number" readOnly />
           <Input label="Thưởng" value={form.bonus} onChange={(value) => onFormChange({ ...form, bonus: value })} type="number" />
           <Input label="Ứng lương + phạt" value={form.advance_or_penalty} onChange={(value) => onFormChange({ ...form, advance_or_penalty: value })} type="number" />
           <label className="field field-wide">
@@ -6823,8 +6979,10 @@ function Input({
 }
 
 function calculatedMonthlySalaryValue(form: PayrollForm) {
-  const dailySalary = calculatedDailySalary(form)
-  return dailySalary === null ? '' : String(roundDraftNumber(dailySalary * 26))
+  const monthlySalary = parseOptionalNumber(form.monthly_salary)
+  if (monthlySalary !== null) return String(roundDraftNumber(monthlySalary))
+  const hourlySalary = parseOptionalNumber(form.hourly_salary)
+  return hourlySalary === null ? '' : String(roundDraftNumber(hourlySalary * 208))
 }
 
 function calculatedDailySalaryValue(form: PayrollForm) {
@@ -6833,8 +6991,17 @@ function calculatedDailySalaryValue(form: PayrollForm) {
 }
 
 function calculatedDailySalary(form: PayrollForm) {
+  const monthlySalary = parseOptionalNumber(form.monthly_salary)
+  if (monthlySalary !== null) return monthlySalary / 26
   const hourlySalary = parseOptionalNumber(form.hourly_salary)
   return hourlySalary === null ? null : hourlySalary * 8
+}
+
+function calculatedHourlySalaryValue(form: PayrollForm) {
+  const monthlySalary = parseOptionalNumber(form.monthly_salary)
+  if (monthlySalary !== null) return String(roundDraftNumber(monthlySalary / 208))
+  const hourlySalary = parseOptionalNumber(form.hourly_salary)
+  return hourlySalary === null ? '' : String(roundDraftNumber(hourlySalary))
 }
 
 function emptyPayrollForm(): PayrollForm {
@@ -6846,35 +7013,32 @@ function emptyPayrollForm(): PayrollForm {
     daily_salary: '',
     hourly_salary: '',
     standard_work_days: '26',
-    bonus: '0',
-    advance_or_penalty: '0',
+    bonus: '',
+    advance_or_penalty: '',
     note: '',
   }
 }
 
 function formFromEmployee(employee: PayrollEmployee): PayrollForm {
-  const hourlySalary =
-    Number(employee.hourly_salary || 0) > 0
-      ? employee.hourly_salary
-      : Number(employee.daily_salary_input || employee.daily_salary || 0) > 0
-        ? Number(employee.daily_salary_input || employee.daily_salary) / 8
-        : 0
+  const monthlySalary = Number(employee.monthly_salary || 0)
+  const hourlySalary = Number(employee.hourly_salary || 0)
   const form = {
     employee_code: employee.employee_code,
     name: employee.name ?? '',
     start_work_note: employee.start_work_note ?? '',
-    monthly_salary: '',
+    monthly_salary: monthlySalary > 0 ? String(roundDraftNumber(monthlySalary)) : '',
     daily_salary: '',
-    hourly_salary: hourlySalary ? String(roundDraftNumber(hourlySalary)) : '',
+    hourly_salary: hourlySalary > 0 ? String(roundDraftNumber(hourlySalary)) : '',
     standard_work_days: '26',
-    bonus: String(employee.bonus || 0),
-    advance_or_penalty: String(employee.advance_or_penalty || 0),
+    bonus: employee.bonus ? String(employee.bonus) : '',
+    advance_or_penalty: '',
     note: employee.note ?? '',
   }
   return {
     ...form,
-    monthly_salary: calculatedMonthlySalaryValue(form) || (employee.monthly_salary ? String(employee.monthly_salary) : ''),
-    daily_salary: calculatedDailySalaryValue(form) || (employee.daily_salary ? String(employee.daily_salary) : ''),
+    monthly_salary: calculatedMonthlySalaryValue(form),
+    daily_salary: calculatedDailySalaryValue(form),
+    hourly_salary: calculatedHourlySalaryValue(form),
   }
 }
 
@@ -6897,7 +7061,7 @@ function payrollPayload(form: PayrollForm, factory: FactoryMode) {
     start_work_note: form.start_work_note,
     monthly_salary: parseOptionalNumber(calculatedMonthlySalaryValue(form)),
     daily_salary: parseOptionalNumber(calculatedDailySalaryValue(form)),
-    hourly_salary: parseOptionalNumber(form.hourly_salary),
+    hourly_salary: parseOptionalNumber(calculatedHourlySalaryValue(form)),
     standard_work_days: 26,
     bonus: parseNumber(form.bonus, 0),
     advance_or_penalty: parseNumber(form.advance_or_penalty, 0),

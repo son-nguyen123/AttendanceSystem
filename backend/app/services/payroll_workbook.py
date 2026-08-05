@@ -169,7 +169,9 @@ def _build_employee_preview(
     hourly_salary = calculate_hourly_salary(entry) if include_saved_data else 0
     work_days = total_hours / 8
     bonus = entry.bonus if include_saved_data else None
-    advance_or_penalty = entry.advance_or_penalty if include_saved_data else None
+    # Penalty/advance are period-specific and must be entered deliberately in
+    # the new Output 2 columns; they never carry over from the profile store.
+    advance_or_penalty = None
     month_salary = total_hours * hourly_salary + (bonus or 0) - (advance_or_penalty or 0)
 
     return {

@@ -176,6 +176,9 @@ def merge_payroll_profile_updates(
                 source_kind == "final_copy"
                 and _source_kind(previous_source) == "manual"
                 and not overwrite_manual
+                # An empty placeholder saved from the form is not a real
+                # manual override. Let the newest final copy fill it in.
+                and _has_profile_value(next_entry.get(field))
             ):
                 # Final copies remain available as the current source, but a
                 # manual profile change stays in effect until the user
@@ -359,35 +362,63 @@ def _entry_to_employee(employee_code: str, entry: PayrollEntry) -> dict:
 
 def normalize_payroll_entry(entry: PayrollEntry) -> PayrollEntry:
     data = entry.model_dump()
-    data["hourly_salary"] = calculate_hourly_salary(entry) or None
-    data["daily_salary"] = calculate_daily_salary(entry) or None
-    data["monthly_salary"] = calculate_monthly_salary(entry)
+    # Monthly salary is the source of truth for the new Output 2 layout.
+    # Daily/hourly values are derived from it; legacy hourly/daily-only rows
+    # are still accepted and promoted to a monthly value.
+    monthly_salary = _number_or_none(entry.monthly_salary)
+    if monthly_salary is not None and monthly_salary > 0:
+        data["monthly_salary"] = monthly_salary
+        data["daily_salary"] = monthly_salary / STANDARD_WORK_DAYS
+        data["hourly_salary"] = monthly_salary / STANDARD_WORK_DAYS / 8
+    else:
+        hourly_salary = calculate_hourly_salary(entry)
+        data["hourly_salary"] = hourly_salary or None
+        data["daily_salary"] = hourly_salary * 8 if hourly_salary else None
+        data["monthly_salary"] = hourly_salary * STANDARD_WORK_DAYS * 8 if hourly_salary else None
     data["standard_work_days"] = STANDARD_WORK_DAYS
     return PayrollEntry(**data)
 
 
 def calculate_monthly_salary(entry: PayrollEntry) -> float | None:
-    daily_salary = calculate_daily_salary(entry)
-    if daily_salary:
+    if entry.monthly_salary is not None and float(entry.monthly_salary) > 0:
+        return float(entry.monthly_salary)
+    daily_salary = entry.daily_salary
+    if daily_salary is not None and float(daily_salary) > 0:
         return float(daily_salary) * STANDARD_WORK_DAYS
-    return entry.monthly_salary
+    hourly_salary = entry.hourly_salary
+    if hourly_salary is not None and float(hourly_salary) > 0:
+        return float(hourly_salary) * STANDARD_WORK_DAYS * 8
+    return None
 
 
 def calculate_daily_salary(entry: PayrollEntry) -> float:
-    hourly_salary = calculate_hourly_salary(entry)
+    monthly_salary = calculate_monthly_salary(entry)
+    if monthly_salary:
+        return float(monthly_salary) / STANDARD_WORK_DAYS
+    hourly_salary = entry.hourly_salary
     if hourly_salary:
         return float(hourly_salary) * 8
     return 0
 
 
 def calculate_hourly_salary(entry: PayrollEntry) -> float:
-    if entry.hourly_salary is not None:
-        return float(entry.hourly_salary)
-    if entry.daily_salary is not None:
-        return float(entry.daily_salary) / 8
     if entry.monthly_salary is not None:
         return float(entry.monthly_salary) / STANDARD_WORK_DAYS / 8
+    if entry.daily_salary is not None:
+        return float(entry.daily_salary) / 8
+    if entry.hourly_salary is not None:
+        return float(entry.hourly_salary)
     return 0
+
+
+def _has_profile_value(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (int, float)):
+        return value != 0
+    return bool(value)
 
 
 def _round_optional_number(value: float | None) -> int | float | None:

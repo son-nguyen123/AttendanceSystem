@@ -73,6 +73,9 @@ def get_payroll_employees(
     user: dict = Depends(require_owner),
 ) -> dict[str, Any]:
     if not session_id:
+        # Keep the employee registry in sync with the newest saved final copy
+        # even before a new attendance workbook is uploaded.
+        sync_latest_final_copy_profile(None, factory)
         return {
             "employees": list_payroll_employees(factory),
             "payroll_data": load_payroll_data(factory),
