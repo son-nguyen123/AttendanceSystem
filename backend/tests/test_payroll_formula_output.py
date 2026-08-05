@@ -77,11 +77,16 @@ class PayrollFormulaOutputTests(unittest.TestCase):
         )
         try:
             sheet["A9"] = 8
+            sheet["A10"] = 2
             with patch("app.services.payroll_workbook.get_payroll_entry", return_value=saved_entry):
                 preview = _build_employee_preview(sheet, block, include_saved_data=False)
 
             self.assertEqual(preview["employee_code"], "1006")
             self.assertEqual(preview["total_hours"], 8)
+            self.assertEqual(preview["work_days"], 1)
+            self.assertEqual(preview["overtime_hours"], 2)
+            self.assertEqual(preview["nq_penalty"], 0)
+            self.assertEqual(preview["final_salary"], 0)
             self.assertEqual(preview["name"], "")
             self.assertIsNone(preview["monthly_salary"])
             self.assertIsNone(preview["bonus"])

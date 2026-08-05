@@ -168,11 +168,19 @@ def _build_employee_preview(
     daily_salary = calculate_daily_salary(entry) if include_saved_data else 0
     hourly_salary = calculate_hourly_salary(entry) if include_saved_data else 0
     work_days = total_hours / 8
+    overtime_hours = _sum_work_hours(ws, block.result_row + 1)
     bonus = entry.bonus if include_saved_data else None
     # Penalty/advance are period-specific and must be entered deliberately in
     # the new Output 2 columns; they never carry over from the profile store.
     advance_or_penalty = None
-    month_salary = total_hours * hourly_salary + (bonus or 0) - (advance_or_penalty or 0)
+    nq_penalty = 0
+    month_salary = (
+        daily_salary * work_days
+        + overtime_hours * hourly_salary * 1.5
+        + (bonus or 0)
+        - nq_penalty
+        - (advance_or_penalty or 0)
+    )
 
     return {
         "employee_code": block.employee_code,
@@ -190,7 +198,9 @@ def _build_employee_preview(
         "hourly_salary": _round_number(hourly_salary),
         "standard_work_days": entry.standard_work_days if include_saved_data else 26,
         "work_days": _round_number(work_days),
+        "overtime_hours": _round_number(overtime_hours),
         "bonus": bonus,
+        "nq_penalty": _round_number(nq_penalty),
         "advance_or_penalty": advance_or_penalty,
         "final_salary": _round_number(month_salary),
     }

@@ -115,9 +115,19 @@ type PayrollEmployee = {
   hourly_salary: number
   standard_work_days: number
   work_days: number
+  overtime_hours?: number
   bonus: number
+  nq_penalty?: number
   advance_or_penalty: number
   final_salary: number
+}
+
+type EmployeeCardSource = 'current' | 'history' | 'final_copy'
+
+type EmployeeCardSourceSelection = {
+  source: EmployeeCardSource
+  id?: string
+  label: string
 }
 
 type PayrollForm = {
@@ -524,13 +534,14 @@ function App() {
   const [payrollLoading, setPayrollLoading] = useState(false)
   const [output2ChoiceOpen, setOutput2ChoiceOpen] = useState(false)
   const [employeeCardChoiceOpen, setEmployeeCardChoiceOpen] = useState(false)
+  const [employeeCardKindChoiceOpen, setEmployeeCardKindChoiceOpen] = useState(false)
+  const [employeeCardSource, setEmployeeCardSource] = useState<EmployeeCardSourceSelection | null>(null)
   const [finalCopyConflictOpen, setFinalCopyConflictOpen] = useState(false)
   const [mappingBankInspection, setMappingBankInspection] = useState<MappingBankInspection | null>(null)
   const [mappingBankDecisions, setMappingBankDecisions] = useState<Record<string, MappingBankDecision>>({})
   const [mappingAllowMissingBankAccounts, setMappingAllowMissingBankAccounts] = useState(false)
   const [output2BankMissing, setOutput2BankMissing] = useState<PayrollEmployee[]>([])
   const [output2BankAccounts, setOutput2BankAccounts] = useState<Record<string, string>>({})
-  const [output2AllowMissingBankAccounts, setOutput2AllowMissingBankAccounts] = useState(false)
   const [pendingFactorySwitch, setPendingFactorySwitch] = useState<FactoryMode | null>(null)
   const [smartSettingsOpen, setSmartSettingsOpen] = useState(false)
   const [supportOpen, setSupportOpen] = useState(false)
@@ -1529,7 +1540,7 @@ function App() {
 
   async function runOutput2Export(includeSavedData: boolean) {
     if (!data) return
-    if (includeSavedData && !output2AllowMissingBankAccounts) {
+    if (includeSavedData) {
       setPayrollLoading(true)
       try {
         // Check the exact current employee list before exporting. New codes
@@ -1543,7 +1554,6 @@ function App() {
         if (missing.length) {
           setOutput2BankMissing(missing)
           setOutput2BankAccounts(Object.fromEntries(missing.map((employee) => [employee.employee_code, ''])))
-          setOutput2AllowMissingBankAccounts(false)
           setPayrollLoading(false)
           setOutput2ChoiceOpen(false)
           return
@@ -1557,36 +1567,6 @@ function App() {
     }
     setOutput2ChoiceOpen(false)
     await exportOutput2File(includeSavedData)
-    return
-    setPayrollLoading(true)
-    setError(null)
-    setMessage(null)
-    try {
-      const response = await axios.post(
-        `${API_BASE}/payroll/export-output-2`,
-        {
-          session_id: data!.session_id,
-          review_overrides: buildReviewOverrides(payrollReviewItems),
-          include_saved_data: includeSavedData,
-        },
-        {
-          responseType: 'blob',
-        },
-      )
-      downloadBlob(
-        response.data,
-        readablePeriodExportFilename(data!.factory ?? factoryMode, data!.period, 'Output2', 'xlsx'),
-      )
-      setMessage(
-        data!.missing_output1_summary
-          ? `Đã xuất Output 2 ${includeSavedData ? 'có dữ liệu đã lưu' : 'chỉ giữ công thức'} và bổ sung vùng cột công/lương bên phải.`
-          : `Đã xuất Output 2 ${includeSavedData ? 'có dữ liệu đã lưu' : 'chỉ giữ công thức'}.`,
-      )
-    } catch (err) {
-      setError(readAxiosError(err, 'Không xuất được Output 2'))
-    } finally {
-      setPayrollLoading(false)
-    }
   }
 
   async function confirmOutput2BankAccounts() {
@@ -1597,8 +1577,8 @@ function App() {
       account_number: (output2BankAccounts[employee.employee_code] || '').replace(/\D/g, ''),
     }))
     const unresolved = accounts.filter((row) => !/^\d{8,20}$/.test(row.account_number))
-    if (unresolved.length && !output2AllowMissingBankAccounts) {
-      setError(`Còn ${unresolved.length} mã thiếu số tài khoản. Hãy nhập đủ 8–20 chữ số hoặc bật cho phép xuất tạm.`)
+    if (unresolved.length) {
+      setError(`Còn ${unresolved.length} mã thiếu số tài khoản. Hãy nhập đủ 8–20 chữ số hoặc chọn “Xuất bản hiện tại”.`)
       return
     }
     setPayrollLoading(true)
@@ -1619,12 +1599,17 @@ function App() {
       setOutput2BankMissing([])
       setOutput2BankAccounts({})
       setPayrollLoading(false)
-      await runOutput2Export(true)
-      setOutput2AllowMissingBankAccounts(false)
+      await exportOutput2File(true)
     } catch (err) {
       setPayrollLoading(false)
       setError(readAxiosError(err, 'Không lưu được số tài khoản ngân hàng'))
     }
+  }
+
+  async function exportOutput2WithMissingBankAccounts() {
+    setOutput2BankMissing([])
+    setOutput2BankAccounts({})
+    await exportOutput2File(true)
   }
 
   async function saveCurrentToHistory() {
@@ -2304,7 +2289,7 @@ function App() {
       )
       setMessage(
         data.missing_output1_summary
-          ? 'Đã xuất Output 1 và bổ sung 3 cột: Tổng giờ công, Mã, Tên nhân viên / Ghi chú.'
+          ? 'Đã xuất Output 1 và bổ sung 4 cột theo khung mới: Tổng giờ công, Mức phạt NQ/giờ, Mã, Tên nhân viên / Ghi chú.'
           : 'Đã xuất Output 1',
       )
     } catch (err) {
@@ -2350,6 +2335,58 @@ function App() {
       setError(readAxiosError(err, 'Không xuất được ảnh bảng công nhân viên'))
     } finally {
       setCardExportLoading(null)
+    }
+  }
+
+  async function chooseEmployeeCardSource(source: EmployeeCardSource) {
+    setError(null)
+    if (source === 'current') {
+      if (!data) {
+        setError('Chưa có bản chấm máy đang mở để xuất ảnh.')
+        return
+      }
+      setEmployeeCardSource({ source, label: `Bản đang chấm ${data.period.label || ''}`.trim() })
+      setEmployeeCardChoiceOpen(false)
+      setEmployeeCardKindChoiceOpen(true)
+      return
+    }
+
+    setHistoryLoading(true)
+    try {
+      if (source === 'history') {
+        const response = await axios.get<{ periods: HistoryPeriod[] }>(`${API_BASE}/history/periods`, {
+          params: { factory: factoryMode },
+        })
+        const latest = response.data.periods[0]
+        if (!latest) throw new Error('Chưa có bản chấm máy đã lưu trong lịch sử.')
+        setEmployeeCardSource({ source, id: latest.id, label: latest.label })
+      } else {
+        const response = await axios.get<{ final_copies: HistoryFinalCopy[] }>(`${API_BASE}/history/final-copies`, {
+          params: { factory: factoryMode },
+        })
+        const latest = response.data.final_copies[0]
+        if (!latest) throw new Error('Chưa có bản sao lưu cuối cùng.')
+        setEmployeeCardSource({ source, id: latest.id, label: latest.label })
+      }
+      setEmployeeCardChoiceOpen(false)
+      setEmployeeCardKindChoiceOpen(true)
+    } catch (err) {
+      setError(readAxiosError(err, source === 'history' ? 'Chưa có bản chấm máy đã lưu' : 'Chưa có bản sao lưu cuối cùng'))
+    } finally {
+      setHistoryLoading(false)
+    }
+  }
+
+  async function exportEmployeeCardsFromSelection(kind: 'output1' | 'output2') {
+    const selection = employeeCardSource
+    if (!selection) return
+    setEmployeeCardKindChoiceOpen(false)
+    if (selection.source === 'current') {
+      await exportEmployeeCards(kind)
+    } else if (selection.source === 'history' && selection.id) {
+      await downloadHistoryEmployeeImages(selection.id, kind)
+    } else if (selection.source === 'final_copy' && selection.id) {
+      await downloadFinalCopyEmployeeImages(selection.id, kind)
     }
   }
 
@@ -2412,20 +2449,52 @@ function App() {
             aria-labelledby="employee-card-choice-title"
             onMouseDown={(event) => event.stopPropagation()}
           >
-            <p className="export-choice-kicker">Ảnh bảng công nhân viên</p>
-            <h2 id="employee-card-choice-title">Chọn vùng Excel muốn chụp</h2>
-            <p>Output 1 chỉ lấy phần chấm công. Output 2 lấy cả phần ngày công và khu vực lương của nhân viên trong cùng ảnh.</p>
-            <div className="export-choice-options">
-              <button type="button" className="export-choice-card" disabled={cardExportLoading !== null} onClick={() => { setEmployeeCardChoiceOpen(false); void exportEmployeeCards('output1') }}>
-                <strong>Xuất ảnh Output 1</strong>
-                <span>Ảnh bảng chấm công và thông tin nhân viên.</span>
+            <p className="export-choice-kicker">Bước 1 · Chọn nguồn ảnh</p>
+            <h2 id="employee-card-choice-title">Bạn muốn cắt ảnh từ bản nào?</h2>
+            <p>Sau khi chọn nguồn, app mới hỏi bạn muốn cắt theo khung Output 1 hay Output 2.</p>
+            <div className="export-choice-options employee-card-source-options">
+              <button type="button" className="export-choice-card" disabled={!data || historyLoading} onClick={() => void chooseEmployeeCardSource('current')}>
+                <strong>Bản vừa chấm máy, chưa lưu</strong>
+                <span>Dùng đúng phiên đang mở và các chỉnh sửa tạm hiện tại.</span>
               </button>
-              <button type="button" className="export-choice-card formula-only" disabled={cardExportLoading !== null} onClick={() => { setEmployeeCardChoiceOpen(false); void exportEmployeeCards('output2') }}>
-                <strong>Xuất ảnh Output 2</strong>
-                <span>Ảnh mở rộng gồm ngày công và toàn bộ khu vực lương.</span>
+              <button type="button" className="export-choice-card" disabled={historyLoading} onClick={() => void chooseEmployeeCardSource('history')}>
+                <strong>Bản chấm máy đã lưu</strong>
+                <span>Lấy kỳ chấm máy mới nhất đã lưu trong Lịch sử.</span>
+              </button>
+              <button type="button" className="export-choice-card formula-only" disabled={historyLoading} onClick={() => void chooseEmployeeCardSource('final_copy')}>
+                <strong>Bản sao lưu cuối cùng</strong>
+                <span>Lấy bản chốt mới nhất đang có trong kho sao lưu.</span>
               </button>
             </div>
             <button type="button" className="secondary-button export-choice-cancel" onClick={() => setEmployeeCardChoiceOpen(false)}>Hủy</button>
+          </section>
+        </div>
+      )}
+      {employeeCardKindChoiceOpen && employeeCardSource && (
+        <div className="export-choice-backdrop" role="presentation" onMouseDown={() => setEmployeeCardKindChoiceOpen(false)}>
+          <section
+            className="export-choice-dialog employee-card-choice-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="employee-card-kind-choice-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <p className="export-choice-kicker">Bước 2 · Chọn khung cắt</p>
+            <h2 id="employee-card-kind-choice-title">Xuất Output 1 hay Output 2?</h2>
+            <p>Nguồn đã chọn: <strong>{employeeCardSource.label}</strong>. Output 1 cắt đến thông tin nhân viên; Output 2 lấy toàn bộ khung công và lương mới.</p>
+            <div className="export-choice-options">
+              <button type="button" className="export-choice-card" disabled={cardExportLoading !== null || historyLoading} onClick={() => void exportEmployeeCardsFromSelection('output1')}>
+                <strong>Xuất ảnh Output 1</strong>
+                <span>Cắt phần bảng công đến cột tên nhân viên/ghi chú.</span>
+              </button>
+              <button type="button" className="export-choice-card formula-only" disabled={cardExportLoading !== null || historyLoading} onClick={() => void exportEmployeeCardsFromSelection('output2')}>
+                <strong>Xuất ảnh Output 2</strong>
+                <span>Cắt toàn bộ khung mới gồm ngày công, làm thêm và khu vực lương.</span>
+              </button>
+            </div>
+            <button type="button" className="secondary-button export-choice-cancel" onClick={() => { setEmployeeCardKindChoiceOpen(false); setEmployeeCardChoiceOpen(true) }}>
+              Quay lại chọn nguồn
+            </button>
           </section>
         </div>
       )}
@@ -2952,7 +3021,7 @@ function App() {
       )}
 
       {output2BankMissing.length > 0 && (
-        <div className="export-choice-backdrop" role="presentation" onMouseDown={() => { setOutput2BankMissing([]); setOutput2AllowMissingBankAccounts(false) }}>
+        <div className="export-choice-backdrop" role="presentation" onMouseDown={() => setOutput2BankMissing([])}>
           <section
             className="export-choice-dialog mapping-bank-dialog"
             role="dialog"
@@ -2984,24 +3053,19 @@ function App() {
                 ))}
               </div>
             </div>
-            <label className="mapping-bank-allow-missing">
-              <input
-                type="checkbox"
-                checked={output2AllowMissingBankAccounts}
-                onChange={(event) => setOutput2AllowMissingBankAccounts(event.target.checked)}
-              />
-              <span>Cho phép xuất tạm, để trống tài khoản chưa nhập</span>
-            </label>
             <div className="export-choice-options mapping-bank-actions">
               <button type="button" className="export-choice-card bank-save-choice" disabled={payrollLoading} onClick={() => void confirmOutput2BankAccounts()}>
-                <strong>{payrollLoading ? 'Đang lưu...' : 'Lưu tài khoản và xuất Output 2'}</strong>
+                <strong>{payrollLoading ? 'Đang lưu...' : 'Nhập thông tin thiếu rồi xuất'}</strong>
                 <span>Số hợp lệ được lưu vào kho Ngân hàng; Drive sẽ được sao lưu nếu đã cài.</span>
               </button>
-              <button type="button" className="export-choice-card formula-only" disabled={payrollLoading} onClick={() => { setOutput2BankMissing([]); setOutput2AllowMissingBankAccounts(false) }}>
-                <strong>Hủy xuất</strong>
-                <span>Không xuất file và không thay đổi dữ liệu.</span>
+              <button type="button" className="export-choice-card formula-only" disabled={payrollLoading} onClick={() => void exportOutput2WithMissingBankAccounts()}>
+                <strong>Xuất bản hiện tại</strong>
+                <span>Vẫn xuất Output 2 ngay và để trống tài khoản của các mã đang thiếu.</span>
               </button>
             </div>
+            <button type="button" className="secondary-button export-choice-cancel" disabled={payrollLoading} onClick={() => setOutput2BankMissing([])}>
+              Hủy
+            </button>
           </section>
         </div>
       )}
@@ -3019,12 +3083,12 @@ function App() {
             <h2 id="output2-choice-title">Bạn muốn xuất theo dạng nào?</h2>
             <p>
               Dữ liệu chấm công và mã nhân viên luôn được giữ. Bạn chọn có hoặc không mang theo dữ liệu
-              lương, thưởng, ứng lương và ghi chú đang lưu trên máy.
+              hồ sơ lương, thưởng và ghi chú đang lưu trên máy. Phạt NQ và ứng lương tháng này không tự điền.
             </p>
             <div className="export-choice-options">
               <button type="button" className="export-choice-card" onClick={() => void runOutput2Export(true)}>
                 <strong>Có dữ liệu đã lưu</strong>
-                <span>Điền sẵn thông tin lương, thưởng, ứng lương và ghi chú.</span>
+                <span>Điền sẵn tên, mức lương, thưởng và ghi chú; vẫn để trống phạt NQ và ứng lương.</span>
               </button>
               <button type="button" className="export-choice-card formula-only" onClick={() => void runOutput2Export(false)}>
                 <strong>Chỉ giữ công thức</strong>
@@ -3317,7 +3381,7 @@ function App() {
           onSave={savePayroll}
           onManualEntryBlocked={showManualEntryLockedMessage}
           onRequestOutput2Export={exportOutput2}
-          onExportCards={() => exportEmployeeCards('output2')}
+          onExportCards={() => setEmployeeCardChoiceOpen(true)}
         />
       )}
 
@@ -3341,7 +3405,7 @@ function App() {
           onFormChange={changeManualPayrollForm}
           onSave={savePayroll}
           onRequestOutput2Export={exportOutput2}
-          onExportCards={() => exportEmployeeCards('output2')}
+          onExportCards={() => setEmployeeCardChoiceOpen(true)}
         />
       )}
 
@@ -4801,6 +4865,7 @@ function PayrollOverview({
     ...employee,
     novelty: knownCodeSet.has(employee.employee_code) ? 'returning' : 'first-time',
   }))
+  const selectedEmployee = employees.find((employee) => employee.employee_code === selectedCode)
 
   return (
     <>
@@ -4855,18 +4920,27 @@ function PayrollOverview({
           <h2>Thông tin lương</h2>
           <span>{selectedCode || 'Chưa chọn'}</span>
         </div>
-        <div className="form-grid">
-          <Input label="Tên nhân viên" value={form.name} onChange={(value) => onFormChange({ ...form, name: value })} />
-          <Input label="Bắt đầu làm" value={form.start_work_note} onChange={(value) => onFormChange({ ...form, start_work_note: value })} />
-          <Input label="Mức lương tháng" value={form.monthly_salary} onChange={(value) => onFormChange({ ...form, monthly_salary: value })} type="number" />
-          <Input label="Lương 1 ngày công" value={calculatedDailySalaryValue(form)} onChange={() => undefined} type="number" readOnly />
-          <Input label="Lương 1 giờ công" value={calculatedHourlySalaryValue(form)} onChange={() => undefined} type="number" readOnly />
-          <Input label="Thưởng" value={form.bonus} onChange={(value) => onFormChange({ ...form, bonus: value })} type="number" />
-          <Input label="Ứng lương (tháng này)" value={form.advance_or_penalty} onChange={(value) => onFormChange({ ...form, advance_or_penalty: value })} type="number" />
-          <label className="field field-wide">
-            <span>Ghi chú dòng h+7</span>
-            <textarea value={form.note} onChange={(event) => onFormChange({ ...form, note: event.target.value })} />
-          </label>
+        <div className="payroll-frame-form-wrap">
+          <div className="payroll-frame-form" aria-label="Các cột khung Output 2 mới">
+            <Input label="Mã" value={selectedCode} onChange={() => undefined} readOnly />
+            <Input label="Tên nhân viên / Ghi chú" value={form.name} onChange={(value) => onFormChange({ ...form, name: value })} />
+            <Input label="Mức Lương" value={form.monthly_salary} onChange={(value) => onFormChange({ ...form, monthly_salary: value })} type="number" />
+            <Input label="Lương 1 Ngày Công" value={calculatedDailySalaryValue(form)} onChange={() => undefined} type="number" readOnly />
+            <Input label="Lương 1 Giờ Công" value={calculatedHourlySalaryValue(form)} onChange={() => undefined} type="number" readOnly />
+            <Input label="Số Ngày Đi Làm" value={formatEditableNumber(selectedEmployee?.work_days)} onChange={() => undefined} type="number" readOnly />
+            <Input label="Giờ làm thêm" value={formatEditableNumber(selectedEmployee?.overtime_hours)} onChange={() => undefined} type="number" readOnly />
+            <Input label="Thưởng" value={form.bonus} onChange={(value) => onFormChange({ ...form, bonus: value })} type="number" />
+            <Input label="Phạt NQ" value={formatEditableNumber(selectedEmployee?.nq_penalty)} onChange={() => undefined} type="number" readOnly />
+            <Input label="Ứng Lương" value={form.advance_or_penalty} onChange={(value) => onFormChange({ ...form, advance_or_penalty: value })} type="number" />
+            <Input label={`Lương Tháng ${attendanceData.period.year || ''}`} value={calculatedFrameFinalSalaryValue(form, selectedEmployee)} onChange={() => undefined} type="number" readOnly />
+          </div>
+          <div className="form-grid payroll-profile-notes">
+            <Input label="Bắt đầu làm" value={form.start_work_note} onChange={(value) => onFormChange({ ...form, start_work_note: value })} />
+            <label className="field">
+              <span>Ghi chú dòng h+7</span>
+              <textarea value={form.note} onChange={(event) => onFormChange({ ...form, note: event.target.value })} />
+            </label>
+          </div>
         </div>
         <div className="payroll-actions">
           <button type="button" disabled={!selectedCode || loading} onClick={onSave}>Lưu thông tin lương</button>
@@ -7004,6 +7078,24 @@ function calculatedHourlySalaryValue(form: PayrollForm) {
   if (monthlySalary !== null) return String(roundDraftNumber(monthlySalary / 208))
   const hourlySalary = parseOptionalNumber(form.hourly_salary)
   return hourlySalary === null ? '' : String(roundDraftNumber(hourlySalary))
+}
+
+function formatEditableNumber(value: number | null | undefined) {
+  const number = Number(value || 0)
+  return String(roundDraftNumber(Number.isFinite(number) ? number : 0))
+}
+
+function calculatedFrameFinalSalaryValue(form: PayrollForm, employee?: PayrollEmployee) {
+  const dailySalary = Number(calculatedDailySalaryValue(form) || 0)
+  const hourlySalary = Number(calculatedHourlySalaryValue(form) || 0)
+  const workDays = Number(employee?.work_days || 0)
+  const overtimeHours = Number(employee?.overtime_hours || 0)
+  const bonus = parseNumber(form.bonus, 0)
+  const nqPenalty = Number(employee?.nq_penalty || 0)
+  const advance = parseNumber(form.advance_or_penalty, 0)
+  return String(roundDraftNumber(
+    dailySalary * workDays + overtimeHours * hourlySalary * 1.5 + bonus - nqPenalty - advance,
+  ))
 }
 
 function emptyPayrollForm(): PayrollForm {
