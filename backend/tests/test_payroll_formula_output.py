@@ -16,17 +16,18 @@ from app.services.payroll_workbook import (
 
 
 class PayrollFormulaOutputTests(unittest.TestCase):
-    def test_output2_uses_formula_layout_and_merged_note_band(self) -> None:
+    def test_output2_uses_formula_layout_and_separate_note_areas(self) -> None:
         workbook = Workbook()
         sheet = workbook.active
         block = SimpleNamespace(header_row=3, result_row=9, employee_code="1006")
         preview = {
-            "name": "Hồ Thị Tú Uyên",
+            "name": "Employee Name",
+            "bank_account": "56010001632781",
             "monthly_salary": 3_330_000,
             "bonus": 200_000,
             "advance_or_penalty": 500_000,
-            "start_work_note": "",
-            "note": "Làm tốt chuyên cần",
+            "start_work_note": "02/2023",
+            "note": "Attendance comment",
         }
         try:
             sheet["C3"] = "2026-06-01 ~ 2026-06-30"
@@ -45,13 +46,21 @@ class PayrollFormulaOutputTests(unittest.TestCase):
                 self.assertEqual(sheet[coordinate].value, formula)
 
             self.assertEqual(sheet["AH9"].value, "1006")
-            self.assertEqual(sheet["AI9"].value, "Hồ Thị Tú Uyên")
+            self.assertEqual(sheet["AI9"].value, "Employee Name")
+            self.assertEqual(sheet["AI8"].value, "56010001632781")
+            self.assertEqual(sheet["AI8"].number_format, "@")
             self.assertEqual(sheet["AJ9"].value, 3_330_000)
+            self.assertEqual(sheet["AJ9"].font.color.rgb, "00000000")
             self.assertEqual(sheet["AO9"].value, 200_000)
             self.assertEqual(sheet["AQ9"].value, 500_000)
-            self.assertIn("AI10:AR10", {str(item) for item in sheet.merged_cells.ranges})
-            self.assertEqual(sheet["AI10"].value, "Làm tốt chuyên cần")
-            self.assertEqual(sheet["AI10"].fill.fgColor.rgb, "00FFF4CC")
+            self.assertIn("AJ10:AR10", {str(item) for item in sheet.merged_cells.ranges})
+            self.assertEqual(sheet["AI10"].value, "Bắt đầu làm 02/2023")
+            self.assertEqual(sheet["AI10"].fill.fgColor.rgb, "00DDEBF7")
+            self.assertTrue(sheet["AI10"].font.bold)
+            self.assertEqual(sheet["AI10"].font.color.rgb, "00000000")
+            self.assertEqual(sheet["AJ10"].value, "Attendance comment")
+            self.assertEqual(sheet["AJ10"].fill.fgColor.rgb, "00FFF4CC")
+            self.assertEqual(sheet["AJ10"].font.color.rgb, "00C00000")
         finally:
             workbook.close()
 
@@ -60,9 +69,9 @@ class PayrollFormulaOutputTests(unittest.TestCase):
         sheet = workbook.active
         block = SimpleNamespace(header_row=3, result_row=9, employee_code="1006")
         saved_entry = SimpleNamespace(
-            name="Nguyen Van A",
+            name="Employee Name",
             start_work_note="2025-01-01",
-            note="Du lieu luu tren may",
+            note="Local data",
             bonus=200_000,
             advance_or_penalty=500_000,
         )

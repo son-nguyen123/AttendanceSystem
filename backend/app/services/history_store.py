@@ -16,9 +16,9 @@ from app.services.payroll_store import (
     get_payroll_entry,
     load_payroll_data,
     merge_missing_payroll_entries,
-    merge_payroll_profile_updates,
     normalize_employee_code,
 )
+from app.services.owner_profile_sync import sync_latest_final_copy_profile
 from app.services.payroll_workbook import export_payroll_workbook, preview_payroll
 from app.services.workbook_processor import analyze_workbook, export_processed_workbook
 
@@ -143,14 +143,25 @@ def save_session_to_history(
 
     overrides = review_overrides or []
     factory = _normalize_factory(factory)
+    profile_sync = sync_latest_final_copy_profile(source_path, factory)
+    profile_codes = {
+        str(code).strip()
+        for code in profile_sync.get("profile_codes", [])
+        if str(code).strip()
+    } if profile_sync.get("status") == "ok" else set()
 
     shutil.copy2(source_path, original_path)
-    export_processed_workbook(source_path, output1_path, review_overrides=overrides)
-    export_payroll_workbook(source_path, output2_path, review_overrides=overrides)
+    export_processed_workbook(source_path, output1_path, review_overrides=overrides, factory=factory)
+    export_payroll_workbook(
+        source_path, output2_path, review_overrides=overrides,
+        profile_codes=profile_codes, factory=factory,
+    )
 
     analysis = analyze_workbook(source_path)
     _apply_review_overrides_to_analysis(analysis, overrides)
-    payroll_preview = preview_payroll(source_path, review_overrides=overrides)
+    payroll_preview = preview_payroll(
+        source_path, review_overrides=overrides, profile_codes=profile_codes, factory=factory,
+    )
     payroll_by_code = {item["employee_code"]: item for item in payroll_preview.get("employees", [])}
     manual_by_employee_day = _manual_checks_by_employee_day(analysis.get("manual_checks", []))
     review_notes_by_employee_day = _review_notes_by_employee_day(overrides)
@@ -195,13 +206,14 @@ def save_session_to_history(
                     "name": payroll_by_code.get(normalize_employee_code(block.get("employee_code")), {}).get("name", "")
                 }
                 for block in analysis.get("blocks", [])
-            }
+            },
+            factory=factory,
         )
 
         for block in analysis.get("blocks", []):
             employee_code = normalize_employee_code(block["employee_code"])
             payroll = payroll_by_code.get(employee_code, {})
-            employee_name = get_payroll_entry(employee_code).name or payroll.get("name") or ""
+            employee_name = get_payroll_entry(employee_code, factory).name or payroll.get("name") or ""
             conn.execute(
                 """
                 INSERT INTO employee_monthly_records (
@@ -250,23 +262,10 @@ def save_session_to_history(
                     ),
                 )
 
-    profile_updates = {
-        normalize_employee_code(code): {
-            key: payroll.get(key)
-            for key in ("name", "start_work_note", "monthly_salary", "daily_salary", "hourly_salary")
-            if payroll.get(key) not in (None, "")
-        }
-        for code, payroll in payroll_by_code.items()
-        if normalize_employee_code(code) and isinstance(payroll, dict)
-    }
-    profile_sync = merge_payroll_profile_updates(
-        profile_updates,
-        source_month=selected_month,
-        source_year=selected_year,
-        source_kind="history_output2",
-        source_name=source_filename,
-    )
     detail = get_period_detail(period_id)
+    # A saved history period is an archive, never a profile-data source. The
+    # only source allowed to refresh reusable employee data is a final copy
+    # explicitly selected by the owner.
     detail["profile_sync"] = profile_sync
     return detail
 
@@ -347,7 +346,7 @@ def get_period_detail(period_id: str) -> dict:
     employee_items = []
     for row in employees:
         item = dict(row)
-        item["employee_name"] = _current_employee_name(item["employee_code"], item["employee_name"])
+        item["employee_name"] = _current_employee_name(item["employee_code"], item["employee_name"], period["factory"])
         item["daily_records"] = daily_by_code.get(item["employee_code"], [])
         employee_items.append(item)
 
@@ -461,18 +460,6 @@ def update_employee_monthly_record(period_id: str, employee_code: str, updates: 
         )
 
     _rewrite_history_output_files(dict(period), normalized_code, daily_updates, values)
-    merge_payroll_profile_updates(
-        {
-            normalized_code: {
-                "name": values["employee_name"],
-                "hourly_salary": values["hourly_salary"],
-            }
-        },
-        source_month=int(period["month"]),
-        source_year=int(period["year"]),
-        source_kind="history_output2",
-        source_name=str(period["source_filename"] or ""),
-    )
     return get_period_detail(period_id)
 
 
@@ -512,7 +499,7 @@ def search_employee_history(
     results = []
     for row in rows:
         item = dict(row)
-        item["employee_name"] = _current_employee_name(item["employee_code"], item["employee_name"])
+        item["employee_name"] = _current_employee_name(item["employee_code"], item["employee_name"], item["factory"])
         results.append(item)
     return results
 
@@ -748,7 +735,7 @@ def get_attendance_overview(year: int | None = None, factory: str | None = None)
         if missing_count == "?" or manual_checks or review_notes:
             stats["issue_count"] += 1
 
-    employee_names = _employee_names_by_code()
+    employee_names = _employee_names_by_code(factory)
     employees: dict[str, dict] = {}
     for row in monthly_rows:
         employee_code = str(row["employee_code"])
@@ -945,15 +932,15 @@ def _rewrite_history_output_files(
         ws.cell(row=block.result_row, column=32).value = monthly_values["total_hours"]
         if path_key == "output2_path":
             note_row = block.header_row + 7
-            ws.cell(row=block.result_row, column=34).value = monthly_values["employee_name"]
-            ws.cell(row=block.result_row, column=37).value = monthly_values["monthly_salary"]
-            ws.cell(row=block.result_row, column=38).value = monthly_values["daily_salary"]
-            ws.cell(row=block.result_row, column=39).value = monthly_values["hourly_salary"]
-            ws.cell(row=block.result_row, column=40).value = monthly_values["work_days"]
+            ws.cell(row=block.result_row, column=35).value = monthly_values["employee_name"]
+            ws.cell(row=block.result_row, column=36).value = monthly_values["monthly_salary"]
+            ws.cell(row=block.result_row, column=37).value = monthly_values["daily_salary"]
+            ws.cell(row=block.result_row, column=38).value = monthly_values["hourly_salary"]
+            ws.cell(row=block.result_row, column=39).value = monthly_values["work_days"]
             ws.cell(row=block.result_row, column=41).value = monthly_values["bonus"]
-            ws.cell(row=block.result_row, column=42).value = monthly_values["advance_or_penalty"]
-            ws.cell(row=block.result_row, column=43).value = monthly_values["final_salary"]
-            ws.cell(row=note_row, column=40).value = monthly_values["note"]
+            ws.cell(row=block.result_row, column=43).value = monthly_values["advance_or_penalty"]
+            ws.cell(row=block.result_row, column=44).value = monthly_values["final_salary"]
+            ws.cell(row=note_row, column=35).value = monthly_values["note"]
 
         wb.save(path)
 
@@ -999,10 +986,9 @@ def _connect() -> Iterator[sqlite3.Connection]:
 
 
 def _bootstrap_payroll_data_from_history(conn: sqlite3.Connection) -> None:
-    existing_codes = set(load_payroll_data().keys())
     rows = conn.execute(
         """
-        SELECT em.employee_code, em.employee_name, em.note
+        SELECT em.employee_code, em.employee_name, em.note, p.factory
         FROM employee_monthly_records em
         JOIN attendance_periods p ON p.id = em.period_id
         WHERE TRIM(em.employee_code) != ''
@@ -1010,24 +996,28 @@ def _bootstrap_payroll_data_from_history(conn: sqlite3.Connection) -> None:
         """
     ).fetchall()
 
-    defaults: dict[str, dict] = {}
+    defaults_by_factory: dict[str, dict[str, dict]] = {"factory1": {}, "factory2": {}}
+    existing_by_factory = {factory: set(load_payroll_data(factory).keys()) for factory in defaults_by_factory}
     for row in rows:
+        factory = _normalize_factory(row["factory"])
         employee_code = normalize_employee_code(row["employee_code"])
-        if not employee_code or employee_code in existing_codes or employee_code in defaults:
+        defaults = defaults_by_factory[factory]
+        if not employee_code or employee_code in existing_by_factory[factory] or employee_code in defaults:
             continue
         defaults[employee_code] = {
             "name": str(row["employee_name"] or "").strip(),
             "note": str(row["note"] or "").strip(),
         }
 
-    merge_missing_payroll_entries(defaults)
+    for factory, defaults in defaults_by_factory.items():
+        merge_missing_payroll_entries(defaults, factory=factory)
 
 
-def _current_employee_name(employee_code: object, fallback: object = "") -> str:
+def _current_employee_name(employee_code: object, fallback: object = "", factory: str = "factory1") -> str:
     fallback_name = str(fallback or "").strip()
     if fallback_name:
         return fallback_name
-    current_name = get_payroll_entry(normalize_employee_code(employee_code)).name.strip()
+    current_name = get_payroll_entry(normalize_employee_code(employee_code), factory).name.strip()
     return current_name
 
 
@@ -1040,10 +1030,10 @@ def _safe_final_copies(factory: str | None = None) -> list[dict]:
         return []
 
 
-def _employee_names_by_code() -> dict[str, str]:
+def _employee_names_by_code(factory: str = "factory1") -> dict[str, str]:
     return {
         normalize_employee_code(code): str(entry.get("name") or "").strip()
-        for code, entry in load_payroll_data().items()
+        for code, entry in load_payroll_data(factory).items()
         if isinstance(entry, dict)
     }
 

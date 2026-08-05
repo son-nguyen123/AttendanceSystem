@@ -96,7 +96,12 @@ def analyze_workbook(path: Path) -> dict:
     }
 
 
-def export_processed_workbook(source_path: Path, output_path: Path, review_overrides: list[dict] | None = None) -> Path:
+def export_processed_workbook(
+    source_path: Path,
+    output_path: Path,
+    review_overrides: list[dict] | None = None,
+    factory: str = "factory1",
+) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_path, output_path)
 
@@ -108,7 +113,7 @@ def export_processed_workbook(source_path: Path, output_path: Path, review_overr
 
     for block in blocks:
         _format_attendance_time_row(ws, block)
-        _write_employee_info_line(ws, block)
+        _write_employee_info_line(ws, block, factory=factory)
         for item in _compute_block(ws, block):
             override = overrides.get((block.employee_code, item.day), {})
             missing_count = override.get("missing_count", item.missing_count)
@@ -124,19 +129,19 @@ def export_processed_workbook(source_path: Path, output_path: Path, review_overr
             ws.cell(row=block.result_row, column=item.column).value = (
                 work_value if work_value is not None and work_value != "" else None
             )
-        _write_output1_summary_block(ws, block)
+        _write_output1_summary_block(ws, block, factory=factory)
 
     _format_title_area(ws, 36)
     wb.save(output_path)
     return output_path
 
 
-def _write_output1_summary_block(ws, block) -> None:
+def _write_output1_summary_block(ws, block, factory: str = "factory1") -> None:
     h = block.header_row
     day_row = block.day_row
     result_row = block.result_row
     note_row = h + 7
-    entry = get_payroll_entry(block.employee_code)
+    entry = get_payroll_entry(block.employee_code, factory)
     total_hours = _sum_work_hours(ws, result_row)
 
     headers = {
@@ -221,8 +226,8 @@ def _format_attendance_time_row(ws, block) -> None:
         cell.font = Font(name=FONT_NAME, size=11)
 
 
-def _write_employee_info_line(ws, block) -> None:
-    name = get_payroll_entry(block.employee_code).name.strip()
+def _write_employee_info_line(ws, block, factory: str = "factory1") -> None:
+    name = get_payroll_entry(block.employee_code, factory).name.strip()
     _safe_merge(ws, block.employee_row, 9, block.employee_row, 15)
     name_cell = ws.cell(row=block.employee_row, column=9)
     name_cell.value = f"Tên: {name}" if name else "Tên:"

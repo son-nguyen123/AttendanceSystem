@@ -16,6 +16,7 @@ from app.services.data_mapper import map_owner_data_to_current_workbook
 from app.services.auth_service import AuthError, get_user_by_token
 from app.services.employee_cards import export_employee_cards_zip
 from app.services.factory2_workbook import analyze_factory2_workbook, export_factory2_output1, write_factory2_standard_source
+from app.services.owner_profile_sync import sync_latest_final_copy_profile
 from app.services.payroll_workbook import apply_payroll_to_workbook
 from app.services.workbook_processor import analyze_workbook, export_processed_workbook
 from app.services.workbook_recalculator import recalculate_workbook_totals
@@ -318,6 +319,7 @@ def delete_temporary_attendance_session(
 async def recalculate_attendance_totals(
     file: UploadFile = File(...),
     output_kind: Literal["output1", "output2"] = Form("output1"),
+    factory: Literal["factory1", "factory2"] = Form("factory1"),
     smart_scan: bool = Form(True),
     user: dict = Depends(require_staff_or_owner),
 ) -> FileResponse:
@@ -342,7 +344,15 @@ async def recalculate_attendance_totals(
             inspect_workbook_for_role(uploaded_path, guard_role)
         recalculate_workbook_totals(uploaded_path, recalc_path)
         if output_kind == "output2":
-            apply_payroll_to_workbook(recalc_path, output_path)
+            profile_sync = sync_latest_final_copy_profile(recalc_path, factory)
+            profile_codes = {
+                str(code).strip()
+                for code in profile_sync.get("profile_codes", [])
+                if str(code).strip()
+            } if profile_sync.get("status") == "ok" else set()
+            apply_payroll_to_workbook(
+                recalc_path, output_path, profile_codes=profile_codes, factory=factory,
+            )
         elif recalc_path != output_path:
             shutil.copy2(recalc_path, output_path)
     except Exception as exc:
@@ -390,6 +400,7 @@ async def map_owner_data(
             output2_path,
             mode="output2",
             smart_mapping=smart_mapping,
+            factory=factory,
         )
         map_owner_data_to_current_workbook(
             current_path,
@@ -397,6 +408,7 @@ async def map_owner_data(
             output1_path,
             mode="output1",
             smart_mapping=smart_mapping,
+            factory=factory,
         )
     except Exception as exc:
         shutil.rmtree(session_dir, ignore_errors=True)
@@ -604,6 +616,7 @@ def _prepare_employee_cards_zip(request: EmployeeCardsExportRequest) -> Path:
                 session_dir,
                 [item.model_dump(include=item.model_fields_set) for item in request.review_overrides],
             ),
+            factory=_session_factory(request.session_id),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Không xuất được phiếu nhân viên: {exc}") from exc

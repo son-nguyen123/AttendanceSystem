@@ -84,7 +84,6 @@ def create_period_excel_backup(config: dict[str, Any], detail: dict[str, Any], r
     )
 
     copied = []
-    profile_sync = None
     for key, filename in (
         ("source_path", "00_file_goc.xlsx"),
         ("output1_path", "01_output_1_cham_cong.xlsx"),
@@ -96,13 +95,6 @@ def create_period_excel_backup(config: dict[str, Any], detail: dict[str, Any], r
         target = target_dir / filename
         shutil.copy2(source, target)
         copied.append(str(target))
-        if key == "output2_path":
-            profile_sync = sync_owner_profiles_from_workbook(
-                target,
-                month=_period_month_int(period),
-                year=_period_year_int(period),
-                source_kind="history_output2",
-            )
 
     readme = target_dir / "README.txt"
     readme.write_text(
@@ -130,7 +122,7 @@ def create_period_excel_backup(config: dict[str, Any], detail: dict[str, Any], r
         "files": copied,
         "reason": reason,
         "factory": factory,
-        "profile_sync": profile_sync,
+        "profile_sync": {"status": "skipped", "reason": "final_copy_only"},
     }
 
 
@@ -152,12 +144,6 @@ def create_analysis_excel_copy(
     safe_name = _safe_filename(original_filename or source_path.name)
     target = target_dir / f"Xuong{2 if factory == 'factory2' else 1}_{year}-{month:02d}_BanDangPhanTich_{timestamp}_{safe_name}"
     shutil.copy2(source_path, target)
-    profile_sync = sync_owner_profiles_from_workbook(
-        target,
-        month=month,
-        year=year,
-        source_kind="analysis_copy",
-    )
 
     readme = target_dir / "README.txt"
     readme.write_text(
@@ -182,7 +168,7 @@ def create_analysis_excel_copy(
         "year": year,
         "factory": factory,
         "size_bytes": target.stat().st_size,
-        "profile_sync": profile_sync,
+        "profile_sync": {"status": "skipped", "reason": "final_copy_only"},
     }
 
 
@@ -193,6 +179,7 @@ def create_final_excel_copy(
     month: int,
     year: int,
     factory: str = "factory1",
+    profile_sync_mode: str = "replace_manual",
 ) -> dict[str, Any]:
     factory = _normalize_factory(factory)
     base_dir = Path(str(config.get("drive_backup_dir") or default_backup_dir())).expanduser()
@@ -204,12 +191,21 @@ def create_final_excel_copy(
     safe_name = _safe_filename(original_filename or source_path.name)
     target = target_dir / f"Xuong{2 if factory == 'factory2' else 1}_{year}-{month:02d}_BanChot_{timestamp}_{safe_name}"
     shutil.copy2(source_path, target)
-    profile_sync = sync_owner_profiles_from_workbook(
-        target,
-        month=month,
-        year=year,
-        source_kind="final_copy",
-    )
+    # copy2 preserves the source file timestamp. Touch the target so that when
+    # there are several final copies in one month, the most recently uploaded
+    # copy is unambiguously the authoritative one.
+    target.touch()
+    if profile_sync_mode == "keep_manual":
+        profile_sync = {"status": "skipped", "reason": "manual_profiles_preserved"}
+    else:
+        profile_sync = sync_owner_profiles_from_workbook(
+            target,
+            factory=factory,
+            month=month,
+            year=year,
+            source_kind="final_copy",
+            overwrite_manual=True,
+        )
 
     readme = target_dir / "README.txt"
     readme.write_text(

@@ -1,0 +1,104 @@
+<!doctype html>
+<html>
+<head>
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta charset="utf-8" />
+  <title>Attendance System</title>
+  <HTA:APPLICATION
+    ID="attendanceSplash"
+    APPLICATIONNAME="Attendance System"
+    BORDER="none"
+    CAPTION="no"
+    SHOWINTASKBAR="no"
+    SINGLEINSTANCE="yes"
+    WINDOWSTATE="normal"
+    SCROLL="no"
+  />
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; font-family: "Segoe UI", Arial, sans-serif; }
+    body {
+      position: relative;
+      color: #eef5ff;
+      background: #092452;
+      background: radial-gradient(circle at 15% 5%, #245fac 0, transparent 38%), linear-gradient(135deg, #071a38 0%, #0c326b 62%, #0b4b72 100%);
+    }
+    .grid {
+      position: absolute; inset: 0; opacity: .12;
+      background-image: linear-gradient(rgba(255,255,255,.14) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.14) 1px, transparent 1px);
+      background-size: 36px 36px;
+    }
+    .orb-one, .orb-two { position: absolute; border: 1px solid rgba(180,216,255,.18); border-radius: 50%; }
+    .orb-one { width: 220px; height: 220px; top: -110px; right: -45px; }
+    .orb-two { width: 260px; height: 260px; left: -130px; bottom: -165px; }
+    .card {
+      position: absolute; top: 34px; left: 34px; right: 34px; bottom: 34px;
+      overflow: hidden; border: 1px solid rgba(205,226,255,.22); border-radius: 26px;
+      background: rgba(7,30,66,.88); box-shadow: 0 26px 70px rgba(0,8,28,.48);
+    }
+    .visual {
+      position: absolute; top: 0; bottom: 0; left: 0; width: 42%;
+      background: linear-gradient(145deg, rgba(64,137,238,.34), rgba(20,78,139,.12));
+    }
+    .mark {
+      position: absolute; top: 24px; left: 25px; width: 46px; height: 46px;
+      border-radius: 15px; color: #173e75; background: #f5c84b;
+      font-size: 18px; font-weight: 900; line-height: 46px; text-align: center;
+      box-shadow: 0 10px 24px rgba(0,10,35,.27);
+    }
+    .sheet {
+      position: absolute; width: 154px; height: 174px; left: 50%; top: 50%;
+      margin: -72px 0 0 -77px; padding: 17px; border-radius: 17px;
+      background: #f8fbff; box-shadow: 0 22px 48px rgba(0,15,46,.38);
+      transform: rotate(-3deg);
+    }
+    .sheet-head { height: 8px; width: 58px; margin-bottom: 15px; border-radius: 8px; background: #7190b8; }
+    .row { position: relative; height: 34px; margin-top: 7px; border-radius: 9px; background: #e9f0f8; }
+    .row:before, .row:after { position: absolute; top: 14px; height: 6px; border-radius: 8px; content: ""; }
+    .row:before { left: 10px; width: 53px; background: #7590ae; }
+    .row:after { right: 10px; width: 30px; background: #b5c5d8; }
+    .row.active { background: #dff6e9; }
+    .row.active:before { background: #22a965; }
+    .check {
+      position: absolute; right: -15px; bottom: -15px; width: 50px; height: 50px;
+      border: 5px solid #17477b; border-radius: 50%; color: #0c5d44; background: #8ee0b3;
+      font-size: 24px; font-weight: 900; line-height: 40px; text-align: center;
+    }
+    .copy { position: absolute; top: 0; right: 0; bottom: 0; left: 42%; padding: 56px 40px 34px; }
+    .kicker { margin: 0 0 13px; color: #93b8ed; font-size: 11px; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase; }
+    .kicker i { display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: #63d7aa; box-shadow: 0 0 0 4px rgba(99,215,170,.12); }
+    h1 { margin: 0; color: #fff; font-size: 27px; line-height: 1.2; }
+    p { margin: 13px 0 22px; color: #bfd2ed; font-size: 14px; line-height: 1.55; }
+    .track { height: 6px; overflow: hidden; border-radius: 8px; background: rgba(255,255,255,.13); }
+    .bar { width: 42%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #f5c84b, #fff0a7, #55d2b3); animation: loading 1.3s ease-in-out infinite; }
+    small { display: block; margin-top: 13px; color: #9db8dc; font-size: 11px; }
+    .spinner { display: inline-block; width: 11px; height: 11px; margin-right: 7px; vertical-align: -2px; border: 2px solid rgba(255,255,255,.2); border-top-color: #f5c84b; border-radius: 50%; animation: spin .8s linear infinite; }
+    @keyframes loading { 0% { transform: translateX(-110%); } 100% { transform: translateX(250%); } }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+  <script>
+    window.resizeTo(720, 440);
+    window.moveTo((screen.availWidth - 720) / 2, (screen.availHeight - 440) / 2);
+  </script>
+</head>
+<body>
+  <div class="grid"></div><div class="orb-one"></div><div class="orb-two"></div>
+  <main class="card">
+    <section class="visual">
+      <div class="mark">AS</div>
+      <div class="sheet">
+        <div class="sheet-head"></div>
+        <div class="row active"></div><div class="row"></div><div class="row"></div>
+        <div class="check">&#10003;</div>
+      </div>
+    </section>
+    <section class="copy">
+      <div class="kicker"><i></i>AttendanceSystem</div>
+      <h1>Đang chuẩn bị<br />không gian làm việc</h1>
+      <p>Đang kết nối dữ liệu nhân viên và khởi động hệ thống chấm công.</p>
+      <div class="track"><div class="bar"></div></div>
+      <small><span class="spinner"></span>Vui lòng chờ trong giây lát…</small>
+    </section>
+  </main>
+</body>
+</html>

@@ -18,6 +18,7 @@ from app.services.bank_payroll import (
     save_accounts,
     scan_official_workbook,
 )
+from app.services.bank_account_store import list_account_overview
 
 
 router = APIRouter(prefix="/bank", tags=["bank"])
@@ -44,6 +45,11 @@ class ExportRequest(BaseModel):
 @router.get("/accounts")
 def accounts(factory: str = "factory1", user: dict = Depends(require_owner)):
     return list_accounts(factory)
+
+
+@router.get("/accounts/overview")
+def accounts_overview(factory: str = "factory1", user: dict = Depends(require_owner)):
+    return list_account_overview(factory)
 
 
 @router.post("/accounts")
@@ -82,6 +88,7 @@ def import_word(
     factory: str = Form("factory1"),
     month: int = Form(...),
     year: int = Form(...),
+    mode: str = Form("fill_missing"),
     file: UploadFile = File(...),
     user: dict = Depends(require_owner),
 ):
@@ -92,7 +99,7 @@ def import_word(
     with target.open("wb") as output:
         shutil.copyfileobj(file.file, output)
     try:
-        return import_accounts_from_word(target, factory, month, year)
+        return import_accounts_from_word(target, factory, month, year, mode)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -138,14 +145,14 @@ def export(request: ExportRequest, user: dict = Depends(require_owner)):
 
 
 @router.get("/status")
-def status(user: dict = Depends(require_owner)):
-    return bank_status()
+def status(factory: str = "factory1", user: dict = Depends(require_owner)):
+    return bank_status(factory)
 
 
 @router.post("/backup-drive")
-def backup(user: dict = Depends(require_owner)):
+def backup(factory: str = "factory1", user: dict = Depends(require_owner)):
     try:
-        return backup_registry_to_drive()
+        return backup_registry_to_drive(factory)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

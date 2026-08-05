@@ -1,11 +1,13 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import './App.css'
 
 const API_BASE = 'http://127.0.0.1:8000/api'
 const ROLE_LOGIN_ENABLED = false
 const SMART_SETTINGS_KEY = 'attendance-smart-settings'
-const ATTENDANCE_CALCULATION_VERSION = 7
+// v8 invalidates the short-lived v7 workspace cache that could persist the raw
+// pre-benefit result while automatic newcomer overrides were already saved.
+const ATTENDANCE_CALCULATION_VERSION = 8
 
 type Summary = {
   blocks: number
@@ -24,6 +26,7 @@ type DayResult = {
   work_value: number | string | null
   missing_count: number | string | null
   late_minutes: number | null
+  newcomer_benefit?: string
 }
 
 type EmployeeBlock = {
@@ -395,7 +398,7 @@ type WorkDayRow = {
   manual_checks: string[]
 }
 
-type PayrollReviewType = 'missing' | 'late' | 'rule_change'
+type PayrollReviewType = 'missing' | 'late' | 'rule_change' | 'newcomer_benefit'
 type PayrollReviewStatus = 'pending' | 'ok' | 'edited'
 type PayrollReviewOrigin = 'new' | 'history-applied' | 'rule-changed'
 
@@ -424,9 +427,11 @@ type TemporaryWorkspace = {
   version: 1
   calculation_version?: number
   newcomer_benefit_enabled?: boolean
+  show_newcomer_benefit_review?: boolean
   saved_at: string
   factory: FactoryMode
   data: AnalyzeResponse
+  payroll_employees?: PayrollEmployee[]
   review_items: PayrollReviewItem[]
   review_memory: ReviewMemory | null
   latest_history_info: LatestHistoryInfo
@@ -446,6 +451,8 @@ function App() {
   const [loginForm, setLoginForm] = useState<LoginForm>({ email: '', password: '' })
   const [file, setFile] = useState<File | null>(null)
   const [factoryMode, setFactoryMode] = useState<FactoryMode>('factory1')
+  const factoryModeRef = useRef<FactoryMode>('factory1')
+  const [workspaceCalculationVersion, setWorkspaceCalculationVersion] = useState(ATTENDANCE_CALCULATION_VERSION)
   const [recalculateFile, setRecalculateFile] = useState<File | null>(null)
   const [mappingCurrentFile, setMappingCurrentFile] = useState<File | null>(null)
   const [mappingPreviousFile, setMappingPreviousFile] = useState<File | null>(null)
@@ -491,15 +498,19 @@ function App() {
   const [output1Loading, setOutput1Loading] = useState(false)
   const [payrollLoading, setPayrollLoading] = useState(false)
   const [output2ChoiceOpen, setOutput2ChoiceOpen] = useState(false)
+  const [employeeCardChoiceOpen, setEmployeeCardChoiceOpen] = useState(false)
+  const [finalCopyConflictOpen, setFinalCopyConflictOpen] = useState(false)
   const [pendingFactorySwitch, setPendingFactorySwitch] = useState<FactoryMode | null>(null)
   const [smartSettingsOpen, setSmartSettingsOpen] = useState(false)
   const [supportOpen, setSupportOpen] = useState(false)
   const [smartScanEnabled, setSmartScanEnabled] = useState(() => readSmartSettings().smartScan)
   const [smartMappingEnabled, setSmartMappingEnabled] = useState(() => readSmartSettings().smartMapping)
   const [newcomerBenefitEnabled, setNewcomerBenefitEnabled] = useState(() => readSmartSettings().newcomerBenefit)
+  const [showNewcomerBenefitReview, setShowNewcomerBenefitReview] = useState(() => readSmartSettings().showNewcomerBenefitReview)
   const [showWorkDetail, setShowWorkDetail] = useState(() => readSmartSettings().showWorkDetail)
   const [showManualChecks, setShowManualChecks] = useState(() => readSmartSettings().showManualChecks)
   const [showEmployeeList, setShowEmployeeList] = useState(() => readSmartSettings().showEmployeeList)
+  const [manualEntryLocked, setManualEntryLocked] = useState(() => readSmartSettings().manualEntryLocked)
   const [cardExportLoading, setCardExportLoading] = useState<'output1' | 'output2' | null>(null)
   const [historyLoading, setHistoryLoading] = useState(false)
   const [cloudLoading, setCloudLoading] = useState(false)
@@ -517,9 +528,12 @@ function App() {
   })
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
-  const pendingReviewCount = payrollReviewItems.filter((item) => item.status === 'pending').length
+  const pendingReviewCount = payrollReviewItems.filter(
+    (item) => item.status === 'pending' && (showNewcomerBenefitReview || item.type !== 'newcomer_benefit'),
+  ).length
   const currentReviewTableName = 'bảng kiểm tra Output'
   const isOwner = !ROLE_LOGIN_ENABLED || auth?.user.role === 'owner'
+  const employeeRegistryForCurrentFactory = mergeEmployeeLists(employeeRegistry, payrollEmployees)
 
   useEffect(() => {
     if (!ROLE_LOGIN_ENABLED) return
@@ -576,7 +590,6 @@ function App() {
     let cancelled = false
 
     async function restoreTemporaryWorkspace() {
-      let finishHydration = true
       try {
         localStorage.removeItem('attendance-temporary-workspace-v1')
         const workspaceResponse = await axios.get<TemporaryWorkspace>(`${API_BASE}/attendance/temporary-workspace`)
@@ -585,43 +598,28 @@ function App() {
           throw new Error('Phiên tạm không hợp lệ')
         }
 
-        let restoredData = workspace.data
-        const workspaceNeedsRecalculation =
-          (workspace.calculation_version ?? 0) < ATTENDANCE_CALCULATION_VERSION ||
-          workspace.newcomer_benefit_enabled !== undefined &&
-            workspace.newcomer_benefit_enabled !== newcomerBenefitEnabled
-        if (workspaceNeedsRecalculation) {
-          const refreshedResponse = await axios.post<AnalyzeResponse>(
-            `${API_BASE}/attendance/session/${workspace.data.session_id}/reanalyze`,
-            null,
-            { params: { newcomer_benefit: newcomerBenefitEnabled } },
-          )
-          restoredData = { ...workspace.data, ...refreshedResponse.data }
-        }
-
-        const response = await axios.get<{ employees: PayrollEmployee[] }>(`${API_BASE}/payroll/employees`, {
-          params: { session_id: restoredData.session_id },
-        })
         if (cancelled) return
 
-        const employees = response.data.employees
-        const selectedEmployee =
-          employees.find((employee) => employee.employee_code === workspace.selected_code) ?? employees[0]
+        const restoredNewcomerBenefit = workspace.newcomer_benefit_enabled ?? newcomerBenefitEnabled
+        const workspaceNeedsRecalculation =
+          (workspace.calculation_version ?? 0) < ATTENDANCE_CALCULATION_VERSION
+        const cachedEmployees = workspace.payroll_employees ?? []
+        const cachedSelectedEmployee =
+          cachedEmployees.find((employee) => employee.employee_code === workspace.selected_code) ?? cachedEmployees[0]
+        factoryModeRef.current = workspace.factory
+        setWorkspaceCalculationVersion(workspace.calculation_version ?? 0)
+        setNewcomerBenefitEnabled(restoredNewcomerBenefit)
+        if (workspace.show_newcomer_benefit_review !== undefined) {
+          setShowNewcomerBenefitReview(workspace.show_newcomer_benefit_review)
+        }
         setFactoryMode(workspace.factory)
-        setData(restoredData)
-        setReviewSourceSessionId(restoredData.session_id)
+        setData(workspace.data)
+        setReviewSourceSessionId(workspace.data.session_id)
         setPayrollReviewItems(
           workspaceNeedsRecalculation
-            ? reconcileTemporaryReviewItems(
-                restoredData,
-                workspace.latest_history_info ?? { period: null, employee_codes: [] },
-                workspace.known_history_codes ?? [],
-                workspace.review_memory ?? null,
-                workspace.review_items ?? [],
-                true,
-              )
+            ? []
             : reconcileTemporaryReviewItems(
-                restoredData,
+                workspace.data,
                 workspace.latest_history_info ?? { period: null, employee_codes: [] },
                 workspace.known_history_codes ?? [],
                 workspace.review_memory ?? null,
@@ -631,28 +629,80 @@ function App() {
         setReviewMemory(workspace.review_memory ?? null)
         setLatestHistoryInfo(workspace.latest_history_info ?? { period: null, employee_codes: [] })
         setKnownHistoryCodes(workspace.known_history_codes ?? [])
-        setPayrollEmployees(employees)
-        setSelectedCode(selectedEmployee?.employee_code ?? '')
-        setForm(selectedEmployee ? formFromEmployee(selectedEmployee) : emptyPayrollForm())
-        setActiveView(workspace.active_view === 'payroll' ? 'payroll' : 'attendance')
+        if (cachedEmployees.length) {
+          setPayrollEmployees(cachedEmployees)
+          setSelectedCode(cachedSelectedEmployee?.employee_code ?? '')
+          setForm(cachedSelectedEmployee ? formFromEmployee(cachedSelectedEmployee) : emptyPayrollForm())
+        } else {
+          setSelectedCode(workspace.selected_code ?? '')
+        }
+        setActiveView(workspace.active_view === 'payroll' || workspace.active_view === 'employees' ? workspace.active_view : 'attendance')
         setPeriodMonth(workspace.period_month ?? '')
         setPeriodYear(workspace.period_year ?? '')
         setEmployeeListMonth(workspace.employee_list_month ?? '')
         setEmployeeListYear(workspace.employee_list_year ?? '')
-        setRestoredAnalysisFilename(restoredData.filename)
-        setMessage(`Đã khôi phục phiên tạm đang làm dở: ${restoredData.filename}`)
+        setRestoredAnalysisFilename(workspace.data.filename)
+        setMessage(`Đã mở lại phiên tạm: ${workspace.data.filename}`)
+        // Chỉ khóa giao diện trong lúc đọc JSON phiên tạm. Tính lại Excel và
+        // dựng preview lương là việc nền, không được giữ người dùng ở màn chờ.
+        setWorkspaceHydrated(true)
+
+        let restoredData = workspace.data
+        try {
+          if (workspaceNeedsRecalculation) {
+            const refreshedResponse = await axios.post<AnalyzeResponse>(
+              `${API_BASE}/attendance/session/${workspace.data.session_id}/reanalyze`,
+              null,
+              { params: { newcomer_benefit: restoredNewcomerBenefit } },
+            )
+            restoredData = { ...workspace.data, ...refreshedResponse.data }
+          }
+
+          let employees = cachedEmployees
+          if (!employees.length || workspaceNeedsRecalculation) {
+            const response = await axios.get<{ employees: PayrollEmployee[] }>(`${API_BASE}/payroll/employees`, {
+              params: { session_id: restoredData.session_id },
+            })
+            employees = response.data.employees
+          }
+          if (cancelled) return
+
+          const selectedEmployee =
+            employees.find((employee) => employee.employee_code === workspace.selected_code) ?? employees[0]
+          setData(restoredData)
+          setWorkspaceCalculationVersion(ATTENDANCE_CALCULATION_VERSION)
+          setReviewSourceSessionId(restoredData.session_id)
+          setPayrollReviewItems(
+            reconcileTemporaryReviewItems(
+              restoredData,
+              workspace.latest_history_info ?? { period: null, employee_codes: [] },
+              workspace.known_history_codes ?? [],
+              workspace.review_memory ?? null,
+              workspace.review_items ?? [],
+              workspaceNeedsRecalculation,
+            ),
+          )
+          setPayrollEmployees(employees)
+          setSelectedCode(selectedEmployee?.employee_code ?? '')
+          setForm(selectedEmployee ? formFromEmployee(selectedEmployee) : emptyPayrollForm())
+          setRestoredAnalysisFilename(restoredData.filename)
+          if (workspaceNeedsRecalculation) setMessage(`Đã cập nhật cách tính mới cho: ${restoredData.filename}`)
+        } catch {
+          if (!cancelled) setMessage('Đã mở dữ liệu đã lưu; phần cập nhật Excel nền chưa hoàn tất nhưng bạn vẫn có thể tiếp tục làm việc.')
+        }
       } catch (error) {
         const backendUnavailable = axios.isAxiosError(error) && !error.response
         const noTemporaryWorkspace = axios.isAxiosError(error) && error.response?.status === 404
         if (backendUnavailable) {
-          finishHydration = false
           if (!cancelled) setMessage('Backend chưa sẵn sàng để khôi phục phiên tạm. Hãy tải lại trang sau vài giây.')
         } else if (!noTemporaryWorkspace) {
           void axios.delete(`${API_BASE}/attendance/temporary-workspace`).catch(() => undefined)
           if (!cancelled) setMessage('Phiên tạm cũ không còn dữ liệu nguồn nên đã được dọn khỏi máy.')
         }
       } finally {
-        if (!cancelled && finishHydration) setWorkspaceHydrated(true)
+        // Không để lớp màn hình chờ khóa toàn bộ ứng dụng nếu lần gọi khôi
+        // phục đầu tiên gặp lỗi mạng ngắn hạn; các bộ dữ liệu khác vẫn có thể tải.
+        if (!cancelled) setWorkspaceHydrated(true)
       }
     }
 
@@ -682,11 +732,13 @@ function App() {
 
     const workspace: TemporaryWorkspace = {
       version: 1,
-      calculation_version: ATTENDANCE_CALCULATION_VERSION,
+      calculation_version: workspaceCalculationVersion,
       newcomer_benefit_enabled: newcomerBenefitEnabled,
+      show_newcomer_benefit_review: showNewcomerBenefitReview,
       saved_at: new Date().toISOString(),
       factory: data.factory ?? factoryMode,
       data,
+      payroll_employees: payrollEmployees,
       review_items: payrollReviewItems,
       review_memory: reviewMemory,
       latest_history_info: latestHistoryInfo,
@@ -711,19 +763,30 @@ function App() {
     knownHistoryCodes,
     latestHistoryInfo,
     newcomerBenefitEnabled,
+    payrollEmployees,
+    showNewcomerBenefitReview,
     payrollReviewItems,
     periodMonth,
     periodYear,
     reviewMemory,
     selectedCode,
     workspaceHydrated,
+    workspaceCalculationVersion,
   ])
 
   useEffect(() => {
     if (ROLE_LOGIN_ENABLED && auth?.user.role !== 'owner') return
-    void loadHistoryPeriods()
-    void loadAttendanceOverview(attendanceOverviewYear)
-    void fetchKnownHistoryCodes().then(setKnownHistoryCodes).catch(() => setKnownHistoryCodes([]))
+    const selectedFactory = factoryMode
+    void loadEmployeeRegistry(selectedCode, selectedFactory)
+    void loadHistoryPeriods(historyFilters, selectedFactory)
+    void loadAttendanceOverview(attendanceOverviewYear, selectedFactory)
+    void fetchKnownHistoryCodes(selectedFactory)
+      .then((codes) => {
+        if (factoryModeRef.current === selectedFactory) setKnownHistoryCodes(codes)
+      })
+      .catch(() => {
+        if (factoryModeRef.current === selectedFactory) setKnownHistoryCodes([])
+      })
     // Factory switching is the trigger; including loader functions would retrigger this effect every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [factoryMode])
@@ -735,12 +798,14 @@ function App() {
         smartScan: smartScanEnabled,
         smartMapping: smartMappingEnabled,
         newcomerBenefit: newcomerBenefitEnabled,
+        showNewcomerBenefitReview,
         showWorkDetail,
         showManualChecks,
         showEmployeeList,
+        manualEntryLocked,
       }),
     )
-  }, [smartScanEnabled, smartMappingEnabled, newcomerBenefitEnabled, showWorkDetail, showManualChecks, showEmployeeList])
+  }, [smartScanEnabled, smartMappingEnabled, newcomerBenefitEnabled, showNewcomerBenefitReview, showWorkDetail, showManualChecks, showEmployeeList, manualEntryLocked])
 
   async function login() {
     setLoginLoading(true)
@@ -964,6 +1029,7 @@ function App() {
       const reviewItems = buildPayrollReviewItems(responseData, latestInfo, knownCodes, memory)
       setReviewMemory(memory)
       setData(responseData)
+      setWorkspaceCalculationVersion(ATTENDANCE_CALCULATION_VERSION)
       setPayrollReviewItems(reviewItems)
       setReviewSourceSessionId(responseData.session_id)
       setRestoredAnalysisFilename(responseData.filename)
@@ -1037,6 +1103,7 @@ function App() {
 
     if (!data?.session_id) {
       setNewcomerBenefitEnabled(enabled)
+      if (enabled) setShowNewcomerBenefitReview(true)
       setMessage(enabled ? 'Đã bật quyền lợi ngày đầu cho lần phân tích tiếp theo.' : 'Đã tắt quyền lợi ngày đầu cho lần phân tích tiếp theo.')
       return
     }
@@ -1050,7 +1117,9 @@ function App() {
       )
       const refreshedData = { ...data, ...response.data }
       setNewcomerBenefitEnabled(enabled)
+      if (enabled) setShowNewcomerBenefitReview(true)
       setData(refreshedData)
+      setWorkspaceCalculationVersion(ATTENDANCE_CALCULATION_VERSION)
       setPayrollReviewItems(buildPayrollReviewItems(refreshedData, latestHistoryInfo, knownHistoryCodes, reviewMemory))
       setReviewSourceSessionId(refreshedData.session_id)
       if (isOwner) await refreshPayroll(refreshedData.session_id, false)
@@ -1078,6 +1147,7 @@ function App() {
       const uploadForm = new FormData()
       uploadForm.append('file', recalculateFile)
       uploadForm.append('output_kind', safeOutputKind)
+      uploadForm.append('factory', factoryMode)
       uploadForm.append('smart_scan', String(smartScanEnabled))
       const response = await axios.post(`${API_BASE}/attendance/recalculate-totals`, uploadForm, {
         responseType: 'blob',
@@ -1147,8 +1217,11 @@ function App() {
     setForm(nextEmployee ? formFromEmployee(nextEmployee) : emptyPayrollForm())
   }
 
-  async function loadEmployeeRegistry(selectCode = selectedCode) {
-    const response = await axios.get<{ employees: PayrollEmployee[] }>(`${API_BASE}/payroll/employees`)
+  async function loadEmployeeRegistry(selectCode = selectedCode, factory = factoryMode) {
+    const response = await axios.get<{ employees: PayrollEmployee[] }>(`${API_BASE}/payroll/employees`, {
+      params: { factory },
+    })
+    if (factoryModeRef.current !== factory) return
     const employees = response.data.employees
     setEmployeeRegistry(employees)
     if (!data) {
@@ -1165,9 +1238,9 @@ function App() {
     return response.data
   }
 
-  async function fetchKnownHistoryCodes() {
+  async function fetchKnownHistoryCodes(factory = factoryMode) {
     const response = await axios.get<{ employee_codes: string[] }>(`${API_BASE}/history/employee-codes`, {
-      params: { factory: factoryMode },
+      params: { factory },
     })
     return response.data.employee_codes
   }
@@ -1207,6 +1280,7 @@ function App() {
     setMappingPreviousFile(null)
     setRecalculateFile(null)
     setFinalCopyFile(null)
+    factoryModeRef.current = nextMode
     setFactoryMode(nextMode)
     setHistoryPeriods([])
     setHistoryFinalCopies([])
@@ -1216,6 +1290,8 @@ function App() {
     setSelectedFinalCopyId('')
     setAttendanceOverview(null)
     setCloudSubmissions([])
+    setEmployeeRegistry([])
+    setPayrollEmployees([])
     setSelectedCode('')
     setError(null)
     setMessage(null)
@@ -1234,14 +1310,30 @@ function App() {
     setForm(emptyPayrollForm())
   }
 
+  function changeManualPayrollForm(nextForm: PayrollForm) {
+    if (manualEntryLocked) {
+      showManualEntryLockedMessage()
+      return
+    }
+    setForm(nextForm)
+  }
+
+  function showManualEntryLockedMessage() {
+    setError('Bạn đã khóa nhập thủ công. Muốn sửa thông tin, hãy vào Cài đặt và tắt “Khóa nhập thủ công”.')
+  }
+
   async function savePayroll() {
     if (!form.employee_code) return
+    if (manualEntryLocked) {
+      showManualEntryLockedMessage()
+      return
+    }
 
     setPayrollLoading(true)
     setError(null)
     setMessage(null)
     try {
-      await axios.post(`${API_BASE}/payroll/save`, payrollPayload(form))
+      await axios.post(`${API_BASE}/payroll/save`, payrollPayload(form, factoryMode))
       await loadEmployeeRegistry(form.employee_code)
       await refreshPayroll(undefined, activeView === 'payroll')
       await loadAttendanceOverview(attendanceOverviewYear)
@@ -1258,6 +1350,10 @@ function App() {
 
   async function savePayrollPatches(updates: PayrollPatchUpdate[]) {
     if (!updates.length) return
+    if (manualEntryLocked) {
+      showManualEntryLockedMessage()
+      return
+    }
 
     setPayrollLoading(true)
     setError(null)
@@ -1268,7 +1364,7 @@ function App() {
           const employee = payrollEmployees.find((item) => item.employee_code === employeeCode)
           if (!employee) return Promise.resolve()
 
-          const payload = payrollPayload({ ...formFromEmployee(employee), ...patch })
+          const payload = payrollPayload({ ...formFromEmployee(employee), ...patch }, factoryMode)
 
           return axios.post(`${API_BASE}/payroll/save`, payload)
         }),
@@ -1367,30 +1463,32 @@ function App() {
     }
   }
 
-  async function loadHistoryPeriods(filters = historyFilters) {
+  async function loadHistoryPeriods(filters = historyFilters, factory = factoryMode) {
     setHistoryLoading(true)
     try {
       const response = await axios.get<{ periods: HistoryPeriod[] }>(`${API_BASE}/history/periods`, {
-        params: cleanParams({ ...filters, factory: factoryMode }),
+        params: cleanParams({ ...filters, factory }),
       })
       const finalResponse = await axios.get<{ final_copies: HistoryFinalCopy[] }>(`${API_BASE}/history/final-copies`, {
-        params: cleanParams({ month: filters.month, year: filters.year, factory: factoryMode }),
+        params: cleanParams({ month: filters.month, year: filters.year, factory }),
       })
+      if (factoryModeRef.current !== factory) return
       setHistoryPeriods(response.data.periods)
       setHistoryFinalCopies(finalResponse.data.final_copies)
     } catch (err) {
-      setError(readAxiosError(err, 'Không đọc được lịch sử'))
+      if (factoryModeRef.current === factory) setError(readAxiosError(err, 'Không đọc được lịch sử'))
     } finally {
-      setHistoryLoading(false)
+      if (factoryModeRef.current === factory) setHistoryLoading(false)
     }
   }
 
-  async function loadAttendanceOverview(year = attendanceOverviewYear) {
+  async function loadAttendanceOverview(year = attendanceOverviewYear, factory = factoryMode) {
     setHistoryLoading(true)
     try {
       const response = await axios.get<AttendanceOverview>(`${API_BASE}/history/attendance-overview`, {
-        params: cleanParams({ year, factory: factoryMode }),
+        params: cleanParams({ year, factory }),
       })
+      if (factoryModeRef.current !== factory) return
       setAttendanceOverview(response.data)
       setAttendanceOverviewYear(response.data.year ? String(response.data.year) : '')
       setEmployeeListYear((current) => current || (response.data.year ? String(response.data.year) : ''))
@@ -1402,9 +1500,9 @@ function App() {
         return response.data.employees[0]?.employee_code ?? ''
       })
     } catch (err) {
-      setError(readAxiosError(err, 'Không đọc được chuyên cần'))
+      if (factoryModeRef.current === factory) setError(readAxiosError(err, 'Không đọc được chuyên cần'))
     } finally {
-      setHistoryLoading(false)
+      if (factoryModeRef.current === factory) setHistoryLoading(false)
     }
   }
 
@@ -1458,8 +1556,11 @@ function App() {
       const reviewItems = buildPayrollReviewItems(responseData, latestInfo, knownCodes, memory)
       setReviewMemory(memory)
       setData(responseData)
+      setWorkspaceCalculationVersion(ATTENDANCE_CALCULATION_VERSION)
       setPayrollReviewItems(reviewItems)
-      setFactoryMode(responseData.factory ?? 'factory1')
+      const analyzedFactory = responseData.factory ?? 'factory1'
+      factoryModeRef.current = analyzedFactory
+      setFactoryMode(analyzedFactory)
       setPeriodMonth(responseData.period?.month ? String(responseData.period.month) : '')
       setPeriodYear(responseData.period?.year ? String(responseData.period.year) : '')
       setEmployeeListMonth(responseData.period?.month ? String(responseData.period.month) : '')
@@ -1569,7 +1670,17 @@ function App() {
     }
   }
 
-  async function saveFinalCopy() {
+  async function requestSaveFinalCopy() {
+    if (!finalCopyFile || !finalCopyMonth || !finalCopyYear) return
+
+    setError(null)
+    setMessage(null)
+    // Always ask here. Besides protecting new manual edits, this also lets a
+    // user preserve entries made before source tracking was introduced.
+    setFinalCopyConflictOpen(true)
+  }
+
+  async function saveFinalCopy(profileSyncMode: 'replace_manual' | 'keep_manual') {
     if (!finalCopyFile || !finalCopyMonth || !finalCopyYear) return
 
     setCloudLoading(true)
@@ -1583,15 +1694,15 @@ function App() {
       uploadForm.append('year', finalCopyYear)
       uploadForm.append('factory', factoryMode)
       uploadForm.append('smart_scan', String(smartScanEnabled))
+      uploadForm.append('profile_sync_mode', profileSyncMode)
       const response = await axios.post<{ path: string; folder: string; profile_sync?: ProfileSyncSummary }>(`${API_BASE}/cloud/final-copy`, uploadForm)
       await loadCloudConfig()
       await loadEmployeeRegistry(selectedCode)
       await loadHistoryPeriods(historyFilters)
-      const conflictCount = response.data.profile_sync?.conflict_count ?? 0
       setMessage(
-        conflictCount > 0
-          ? `Đã lưu bản sao cuối cùng. ${conflictCount} mã giữ thông tin từ nguồn mới hơn để tránh ghi đè nhầm.`
-          : `Đã lưu bản sao cuối cùng: ${response.data.path}`,
+        profileSyncMode === 'keep_manual'
+          ? 'Đã lưu bản sao cuối cùng và giữ nguyên các thông tin đã nhập thủ công.'
+          : `Đã lưu bản sao cuối cùng, đã cập nhật thông tin nhân viên từ bản chốt: ${response.data.path}`,
       )
     } catch (err) {
       setError(readAxiosError(err, 'Không lưu được bản sao cuối cùng'))
@@ -1884,6 +1995,32 @@ function App() {
     }
   }
 
+  async function downloadHistoryEmployeeImages(periodId: string, kind: 'output1' | 'output2' = 'output1') {
+    const period = historyPeriods.find((item) => item.id === periodId) ?? historyDetail?.period
+    setHistoryLoading(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const response = await axios.get(`${API_BASE}/history/periods/${periodId}/employee-images/${kind}`, {
+        responseType: 'blob',
+      })
+      downloadBlob(
+        response.data,
+        readablePeriodExportFilename(
+          period?.factory ?? factoryMode,
+          period,
+          kind === 'output1' ? 'AnhBangCongNhanVien' : 'AnhBangLuongNhanVien',
+          'zip',
+        ),
+      )
+      setMessage(`Đã chụp ảnh bảng công từ Excel cho ${period?.label ?? 'kỳ đã chọn'}`)
+    } catch (err) {
+      setError(readAxiosError(err, 'Không xuất được ảnh bảng công từ lịch sử'))
+    } finally {
+      setHistoryLoading(false)
+    }
+  }
+
   async function downloadFinalCopyOutput(copyId: string, kind: 'output1' | 'output2') {
     const finalCopy = historyFinalCopies.find((item) => item.id === copyId)
     setHistoryLoading(true)
@@ -1905,6 +2042,32 @@ function App() {
       setMessage(`Đã xuất ${kind === 'output1' ? 'Output 1' : 'Output 2'} từ bản sao cuối cùng ${finalCopy?.label ?? ''}`.trim())
     } catch (err) {
       setError(readAxiosError(err, `Không xuất được ${kind === 'output1' ? 'Output 1' : 'Output 2'} từ bản sao cuối cùng`))
+    } finally {
+      setHistoryLoading(false)
+    }
+  }
+
+  async function downloadFinalCopyEmployeeImages(copyId: string, kind: 'output1' | 'output2' = 'output2') {
+    const finalCopy = historyFinalCopies.find((item) => item.id === copyId)
+    setHistoryLoading(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const response = await axios.get(`${API_BASE}/history/final-copies/${copyId}/employee-images/${kind}`, {
+        responseType: 'blob',
+      })
+      downloadBlob(
+        response.data,
+        readablePeriodExportFilename(
+          finalCopy?.factory ?? factoryMode,
+          finalCopy,
+          kind === 'output1' ? 'AnhBangCongNhanVien_BanChot' : 'AnhBangLuongNhanVien_BanChot',
+          'zip',
+        ),
+      )
+      setMessage(`Đã chụp ảnh bảng công từ bản sao cuối cùng ${finalCopy?.label ?? ''}`.trim())
+    } catch (err) {
+      setError(readAxiosError(err, 'Không xuất được ảnh bảng công từ bản sao cuối cùng'))
     } finally {
       setHistoryLoading(false)
     }
@@ -1989,14 +2152,7 @@ function App() {
   }
 
   if (authLoading) {
-    return (
-      <main className="app-shell auth-shell">
-        <section className="auth-card">
-          <p className="eyebrow">AttendanceSystem</p>
-          <h1>Đang kiểm tra đăng nhập...</h1>
-        </section>
-      </main>
-    )
+    return <StartupLoadingView />
   }
 
   if (ROLE_LOGIN_ENABLED && !auth) {
@@ -2026,6 +2182,12 @@ function App() {
             onKeyDown={(event) => event.preventDefault()}
           >
             <div className="workspace-restore-spinner" aria-hidden="true">
+              <svg viewBox="0 0 48 48">
+                <rect x="8" y="10" width="32" height="29" rx="7" />
+                <path d="M15 18h18M15 24h11M15 30h8" />
+                <circle cx="34" cy="31" r="7" />
+                <path d="m31 31 2 2 4-5" />
+              </svg>
               <span />
             </div>
             <div className="workspace-restore-copy">
@@ -2036,6 +2198,32 @@ function App() {
               </span>
             </div>
             <div className="workspace-restore-progress" aria-hidden="true"><i /></div>
+          </section>
+        </div>
+      )}
+      {employeeCardChoiceOpen && (
+        <div className="export-choice-backdrop" role="presentation" onMouseDown={() => setEmployeeCardChoiceOpen(false)}>
+          <section
+            className="export-choice-dialog employee-card-choice-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="employee-card-choice-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <p className="export-choice-kicker">Ảnh bảng công nhân viên</p>
+            <h2 id="employee-card-choice-title">Chọn vùng Excel muốn chụp</h2>
+            <p>Output 1 chỉ lấy phần chấm công. Output 2 lấy cả phần ngày công và khu vực lương của nhân viên trong cùng ảnh.</p>
+            <div className="export-choice-options">
+              <button type="button" className="export-choice-card" disabled={cardExportLoading !== null} onClick={() => { setEmployeeCardChoiceOpen(false); void exportEmployeeCards('output1') }}>
+                <strong>Xuất ảnh Output 1</strong>
+                <span>Ảnh bảng chấm công và thông tin nhân viên.</span>
+              </button>
+              <button type="button" className="export-choice-card formula-only" disabled={cardExportLoading !== null} onClick={() => { setEmployeeCardChoiceOpen(false); void exportEmployeeCards('output2') }}>
+                <strong>Xuất ảnh Output 2</strong>
+                <span>Ảnh mở rộng gồm ngày công và toàn bộ khu vực lương.</span>
+              </button>
+            </div>
+            <button type="button" className="secondary-button export-choice-cancel" onClick={() => setEmployeeCardChoiceOpen(false)}>Hủy</button>
           </section>
         </div>
       )}
@@ -2122,9 +2310,9 @@ function App() {
                 type="button"
                 className="download-button secondary-button"
                 disabled={cardExportLoading !== null}
-                onClick={() => exportEmployeeCards('output1')}
+                onClick={() => setEmployeeCardChoiceOpen(true)}
               >
-                {cardExportLoading === 'output1' ? 'Đang xuất ảnh...' : 'Xuất ảnh bảng công NV'}
+                {cardExportLoading ? 'Đang xuất ảnh...' : 'Xuất ảnh bảng công NV'}
               </button>
               {ROLE_LOGIN_ENABLED && !isOwner && (
                 <button type="button" className="download-button" disabled={submitLoading} onClick={submitToOwner}>
@@ -2251,6 +2439,26 @@ function App() {
             </div>
             <div className="smart-setting-row">
               <div>
+                <strong>Khóa nhập thủ công</strong>
+                <span>Khi bật, thông tin ở mục Nhân viên và Bảng lương / Output 2 chỉ nhận từ bản sao cuối cùng. Muốn nhập tay phải tắt khóa này.</span>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={manualEntryLocked}
+                className={`toggle-switch${manualEntryLocked ? ' active' : ''}`}
+                onClick={() => {
+                  setManualEntryLocked((current) => !current)
+                  setError(null)
+                  setMessage(null)
+                }}
+              >
+                <i />
+                <span>{manualEntryLocked ? 'Đã khóa' : 'Cho phép'}</span>
+              </button>
+            </div>
+            <div className="smart-setting-row">
+              <div>
                 <strong>Quyền lợi ngày đầu nhân viên mới</strong>
                 <span>Bật để tự quy đổi mốc chuẩn cho ca đầu của mã mới; tắt nếu chưa có lịch sử nhân viên cũ để tránh cộng giờ nhầm.</span>
               </div>
@@ -2264,6 +2472,23 @@ function App() {
               >
                 <i />
                 <span>{newcomerBenefitEnabled ? 'Bật' : 'Tắt'}</span>
+              </button>
+            </div>
+            <div className="smart-setting-row smart-setting-child">
+              <div>
+                <strong>Yêu cầu kiểm tra ca tự cộng</strong>
+                <span>Hiển thị riêng các ca được tự cộng công do hệ thống nhận diện mã mới; cần xác nhận trước khi lưu hoặc xuất.</span>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={showNewcomerBenefitReview}
+                className={`toggle-switch${showNewcomerBenefitReview ? ' active' : ''}`}
+                onClick={() => setShowNewcomerBenefitReview((current) => !current)}
+                disabled={!newcomerBenefitEnabled || loading}
+              >
+                <i />
+                <span>{showNewcomerBenefitReview ? 'Bật' : 'Tắt'}</span>
               </button>
             </div>
             <div className="smart-setting-divider" aria-hidden="true" />
@@ -2322,6 +2547,50 @@ function App() {
                 Khi tắt kiểm tra, app vẫn xử lý file nhưng sẽ không cảnh báo trước nếu chọn nhầm loại bảng hoặc nhầm kỳ.
               </p>
             )}
+          </section>
+        </div>
+      )}
+
+      {finalCopyConflictOpen && (
+        <div className="export-choice-backdrop" role="presentation" onMouseDown={() => setFinalCopyConflictOpen(false)}>
+          <section
+            className="export-choice-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="final-copy-conflict-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <p className="export-choice-kicker">LƯU BẢN SAO CUỐI CÙNG</p>
+            <h2 id="final-copy-conflict-title">Bạn muốn xử lý thông tin đã nhập tay thế nào?</h2>
+            <p className="export-choice-description">
+              Bản sao vẫn sẽ được lưu vào Drive. Bạn có thể giữ các thông tin đã nhập trong Nhân viên/Bảng lương,
+              hoặc thay chúng bằng thông tin trong bản sao vừa chọn.
+            </p>
+            <div className="export-choice-options">
+              <button
+                type="button"
+                className="export-choice-card saved-data"
+                onClick={() => {
+                  setFinalCopyConflictOpen(false)
+                  void saveFinalCopy('keep_manual')
+                }}
+              >
+                <strong>Không thay đổi cái đã lưu</strong>
+                <span>Lưu bản sao, giữ nguyên toàn bộ thông tin đã nhập thủ công.</span>
+              </button>
+              <button
+                type="button"
+                className="export-choice-card formula-only"
+                onClick={() => {
+                  setFinalCopyConflictOpen(false)
+                  void saveFinalCopy('replace_manual')
+                }}
+              >
+                <strong>Thay đổi cái đã lưu</strong>
+                <span>Lưu bản sao và dùng thông tin trong bản sao để thay thế dữ liệu nhập tay.</span>
+              </button>
+            </div>
+            <button type="button" className="export-choice-cancel" onClick={() => setFinalCopyConflictOpen(false)}>Hủy</button>
           </section>
         </div>
       )}
@@ -2487,7 +2756,7 @@ function App() {
                 disabled={cloudLoading}
                 onFile={selectFinalCopyFile}
               />
-              <button type="button" disabled={!finalCopyFile || !finalCopyMonth || !finalCopyYear || finalCopyInspecting || cloudLoading} onClick={saveFinalCopy}>
+              <button type="button" disabled={!finalCopyFile || !finalCopyMonth || !finalCopyYear || finalCopyInspecting || cloudLoading} onClick={requestSaveFinalCopy}>
                 {cloudLoading ? 'Đang lưu...' : 'Lưu bản sao cuối cùng'}
               </button>
             </div>
@@ -2643,6 +2912,7 @@ function App() {
           showWorkDetail={showWorkDetail}
           showManualChecks={showManualChecks}
           showEmployeeList={showEmployeeList}
+          showNewcomerBenefitReview={showNewcomerBenefitReview}
         />
       )}
 
@@ -2654,39 +2924,48 @@ function App() {
           filterYear={employeeListYear}
           filterMonth={employeeListMonth}
           reviewItems={payrollReviewItems}
+          showNewcomerBenefitReview={showNewcomerBenefitReview}
           latestHistoryInfo={latestHistoryInfo}
           knownHistoryCodes={knownHistoryCodes}
           selectedCode={selectedCode}
           form={form}
           loading={payrollLoading}
           cardExportLoading={cardExportLoading === 'output2'}
+          manualEntryLocked={manualEntryLocked}
           onSelect={selectEmployee}
           onFilterYearChange={changeEmployeeListYear}
           onFilterMonthChange={setEmployeeListMonth}
-          onFormChange={setForm}
+          onFormChange={changeManualPayrollForm}
           onReviewItemsChange={setPayrollReviewItems}
           onSavePatches={savePayrollPatches}
           onSave={savePayroll}
-          onExport={exportOutput2}
+          onManualEntryBlocked={showManualEntryLockedMessage}
+          onRequestOutput2Export={exportOutput2}
           onExportCards={() => exportEmployeeCards('output2')}
         />
       )}
 
       {isOwner && activeView === 'employees' && (
         <EmployeeRegistryView
-          employees={employeeRegistry}
+          employees={data && payrollEmployees.length ? payrollEmployees : employeeRegistryForCurrentFactory}
+          attendanceData={data}
           attendanceOverview={attendanceOverview}
           filterYear={employeeListYear}
           filterMonth={employeeListMonth}
+          latestHistoryInfo={latestHistoryInfo}
+          knownHistoryCodes={knownHistoryCodes}
           selectedCode={selectedCode}
           form={form}
           loading={payrollLoading}
-          onSelect={selectRegistryEmployee}
+          cardExportLoading={cardExportLoading === 'output2'}
+          onSelect={data ? selectEmployee : selectRegistryEmployee}
           onCreate={createRegistryEmployee}
           onFilterYearChange={changeEmployeeListYear}
           onFilterMonthChange={setEmployeeListMonth}
-          onFormChange={setForm}
+          onFormChange={changeManualPayrollForm}
           onSave={savePayroll}
+          onRequestOutput2Export={exportOutput2}
+          onExportCards={() => exportEmployeeCards('output2')}
         />
       )}
 
@@ -2711,6 +2990,8 @@ function App() {
           onSaveEmployee={saveHistoryEmployee}
           onDownloadOutput={downloadHistoryOutput}
           onDownloadFinalCopy={downloadFinalCopyOutput}
+          onDownloadEmployeeImages={downloadHistoryEmployeeImages}
+          onDownloadFinalCopyEmployeeImages={downloadFinalCopyEmployeeImages}
         />
       )}
 
@@ -2871,7 +3152,25 @@ type BankEmployee = {
   name: string
   salary: number
   account_number: string
+  work_days?: number
   conflict_accounts?: string[]
+}
+
+type BankAccountDirectoryRow = {
+  factory: FactoryMode
+  employee_code: string
+  name: string
+  account_number: string
+  conflict_accounts?: string[]
+  updated_at?: string | null
+}
+
+type BankAccountOverview = {
+  factory: FactoryMode
+  accounts: BankAccountDirectoryRow[]
+  total: number
+  with_account: number
+  without_account: number
 }
 
 type BankScan = {
@@ -2883,6 +3182,7 @@ type BankScan = {
 }
 
 function BankPayrollView({ factory }: { factory: FactoryMode }) {
+  const [bankTab, setBankTab] = useState<'transfer' | 'accounts'>('transfer')
   const [file, setFile] = useState<File | null>(null)
   const [scan, setScan] = useState<BankScan | null>(null)
   const [rows, setRows] = useState<BankEmployee[]>([])
@@ -2894,6 +3194,11 @@ function BankPayrollView({ factory }: { factory: FactoryMode }) {
   const [wordFile, setWordFile] = useState<File | null>(null)
   const [wordMonth, setWordMonth] = useState(String(new Date().getMonth() + 1))
   const [wordYear, setWordYear] = useState(String(new Date().getFullYear()))
+  const [wordImportChoiceOpen, setWordImportChoiceOpen] = useState(false)
+  const [accountOverview, setAccountOverview] = useState<BankAccountOverview | null>(null)
+  const [accountSearch, setAccountSearch] = useState('')
+  const [accountLoading, setAccountLoading] = useState(false)
+  const activeCodes = scan ? new Set(rows.map((row) => row.employee_code)) : null
   const missing = rows.filter((row) => !row.account_number.trim()).length
   const conflictCount = rows.filter((row) => row.conflict_accounts?.length).length
   const total = rows.reduce((sum, row) => sum + Number(row.salary || 0), 0)
@@ -2901,6 +3206,24 @@ function BankPayrollView({ factory }: { factory: FactoryMode }) {
     const keyword = search.trim().toLowerCase()
     return !keyword || row.employee_code.toLowerCase().includes(keyword) || row.name.toLowerCase().includes(keyword)
   })
+
+  useEffect(() => {
+    if (bankTab !== 'accounts') return
+    let cancelled = false
+    axios.get<BankAccountOverview>(`${API_BASE}/bank/accounts/overview`, { params: { factory } })
+      .then((response) => {
+        if (!cancelled) setAccountOverview(response.data)
+      })
+      .catch(() => {
+        if (!cancelled) setAccountOverview(null)
+      })
+      .finally(() => {
+        if (!cancelled) setAccountLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [bankTab, factory])
 
   async function scanFile() {
     if (!file) return
@@ -2940,7 +3263,7 @@ function BankPayrollView({ factory }: { factory: FactoryMode }) {
     setError('')
     try {
       const response = await axios.post<{ source?: string; month?: number; year?: number; conflicts?: unknown[] }>(
-        `${API_BASE}/bank/${kind}-drive${kind === 'restore' ? `?factory=${factory}` : ''}`,
+        `${API_BASE}/bank/${kind}-drive?factory=${factory}`,
       )
       if (kind === 'restore' && file) {
         const form = new FormData()
@@ -2979,8 +3302,9 @@ function BankPayrollView({ factory }: { factory: FactoryMode }) {
     }
   }
 
-  async function importWord() {
+  async function importWord(mode: 'fill_missing' | 'replace') {
     if (!wordFile || !wordMonth || !wordYear) return
+    setWordImportChoiceOpen(false)
     setBusy('word')
     setError('')
     setNotice('')
@@ -2988,9 +3312,15 @@ function BankPayrollView({ factory }: { factory: FactoryMode }) {
     form.append('factory', factory)
     form.append('month', wordMonth)
     form.append('year', wordYear)
+    form.append('mode', mode)
     form.append('file', wordFile)
     try {
-      const response = await axios.post<{ imported: number; conflicts: { employee_code: string; accounts: string[] }[]; drive_path: string | null }>(
+      const response = await axios.post<{
+        imported: number
+        conflicts: { employee_code: string; accounts: string[] }[]
+        skipped_existing: string[]
+        drive_path: string | null
+      }>(
         `${API_BASE}/bank/import-word`,
         form,
       )
@@ -3008,13 +3338,40 @@ function BankPayrollView({ factory }: { factory: FactoryMode }) {
         setRows(refreshed.data.employees)
       }
       setNotice(
-        `Đã nhập ${response.data.imported} tài khoản từ Word${response.data.drive_path ? ' và sao lưu theo tháng/năm trên Drive' : ''}.`
-        + (response.data.conflicts.length ? ` Có ${response.data.conflicts.length} mã cần kiểm tra vì có hai số tài khoản.` : ''),
+        `Đã cập nhật ${response.data.imported} tài khoản từ Word${response.data.drive_path ? ' và sao lưu theo tháng/năm trên Drive' : ''}.`
+        + (response.data.skipped_existing.length ? ` Bỏ qua ${response.data.skipped_existing.length} mã đã có số trong chế độ chỉ bổ sung.` : '')
+        + (response.data.conflicts.length ? ` Bỏ qua ${response.data.conflicts.length} mã bị trùng số trong chính file Word.` : ''),
       )
     } catch (err) {
       setError(readAxiosError(err, 'Không nhập được danh sách tài khoản từ Word'))
     } finally {
       setBusy('')
+    }
+  }
+
+  async function saveDirectoryAccount(row: BankAccountDirectoryRow, accountNumber: string) {
+    if (activeCodes?.has(row.employee_code)) {
+      const confirmed = window.confirm(`Mã ${row.employee_code} đã có công trong tháng này. Bạn chắc chắn muốn sửa số tài khoản?`)
+      if (!confirmed) return
+    }
+    try {
+      await axios.post(`${API_BASE}/bank/accounts`, {
+        factory,
+        accounts: [{ ...row, account_number: accountNumber }],
+      })
+      const before = row.account_number ? 1 : 0
+      const after = accountNumber ? 1 : 0
+      setAccountOverview((current) => current ? {
+        ...current,
+        accounts: current.accounts.map((item) => item.employee_code === row.employee_code ? { ...item, account_number: accountNumber } : item),
+        with_account: current.with_account + after - before,
+        without_account: current.without_account - after + before,
+      } : current)
+      setRows((current) => current.map((item) => item.employee_code === row.employee_code ? { ...item, account_number: accountNumber, conflict_accounts: [] } : item))
+      setNotice(`Đã lưu số tài khoản cho mã ${row.employee_code}.`)
+    } catch (err) {
+      setError(readAxiosError(err, 'Không lưu được số tài khoản'))
+      throw err
     }
   }
 
@@ -3026,7 +3383,7 @@ function BankPayrollView({ factory }: { factory: FactoryMode }) {
     try {
       if (saveToDrive) {
         await axios.post(`${API_BASE}/bank/accounts`, { factory, accounts: rows })
-        await axios.post(`${API_BASE}/bank/backup-drive`)
+        await axios.post(`${API_BASE}/bank/backup-drive?factory=${factory}`)
       }
       const response = await axios.post(
         `${API_BASE}/bank/export`,
@@ -3074,6 +3431,32 @@ function BankPayrollView({ factory }: { factory: FactoryMode }) {
           </section>
         </div>
       )}
+      {wordImportChoiceOpen && (
+        <div className="export-choice-backdrop" role="presentation" onMouseDown={() => setWordImportChoiceOpen(false)}>
+          <section
+            className="export-choice-dialog bank-export-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="word-import-choice-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <p className="export-choice-kicker">Nhập danh sách tài khoản</p>
+            <h2 id="word-import-choice-title">Chọn cách xử lý dữ liệu Word</h2>
+            <p>Hai chế độ đều xét theo mã nhân viên, không xóa toàn bộ kho. Các mã có hai số tài khoản khác nhau ngay trong file sẽ được bỏ qua để tránh ghi sai.</p>
+            <div className="export-choice-options">
+              <button type="button" className="export-choice-card formula-only" onClick={() => void importWord('fill_missing')}>
+                <strong>Chỉ bổ sung mã còn thiếu</strong>
+                <span>Giữ nguyên số đã có; chỉ thêm mã chưa có số tài khoản và không bị trùng.</span>
+              </button>
+              <button type="button" className="export-choice-card bank-save-choice" onClick={() => void importWord('replace')}>
+                <strong>Cập nhật theo file Word</strong>
+                <span>Thay số cũ bằng số trong Word theo từng mã; dữ liệu của mã khác vẫn giữ nguyên.</span>
+              </button>
+            </div>
+            <button type="button" className="secondary-button export-choice-cancel" onClick={() => setWordImportChoiceOpen(false)}>Hủy</button>
+          </section>
+        </div>
+      )}
       <div className="bank-hero">
         <div className="bank-hero-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24"><path d="M3 10h18M5 10v8m4-8v8m6-8v8m4-8v8M3 20h18M12 3l9 5H3l9-5Z" /></svg>
@@ -3110,14 +3493,24 @@ function BankPayrollView({ factory }: { factory: FactoryMode }) {
         </label>
         <label className="bank-period-field"><span>Tháng</span><input className="bank-period-input" type="number" min="1" max="12" value={wordMonth} onChange={(event) => setWordMonth(event.target.value)} aria-label="Tháng danh sách Word" /></label>
         <label className="bank-period-field year"><span>Năm</span><input className="bank-period-input year" type="number" min="2000" value={wordYear} onChange={(event) => setWordYear(event.target.value)} aria-label="Năm danh sách Word" /></label>
-        <button type="button" className="secondary-button" disabled={!wordFile || !wordMonth || !wordYear || Boolean(busy)} onClick={importWord}>
+        <button type="button" className="secondary-button" disabled={!wordFile || !wordMonth || !wordYear || Boolean(busy)} onClick={() => setWordImportChoiceOpen(true)}>
           {busy === 'word' ? 'Đang nhập...' : 'Nhập Word'}
+        </button>
+      </div>
+
+      <div className="bank-section-tabs bank-section-tabs-lowered" role="tablist" aria-label="Khu vực ngân hàng">
+        <button type="button" role="tab" aria-selected={bankTab === 'transfer'} className={bankTab === 'transfer' ? 'active' : ''} onClick={() => setBankTab('transfer')}>
+          Danh sách chuyển lương
+        </button>
+        <button type="button" role="tab" aria-selected={bankTab === 'accounts'} className={bankTab === 'accounts' ? 'active' : ''} onClick={() => { setAccountLoading(true); setBankTab('accounts') }}>
+          Danh sách tài khoản
         </button>
       </div>
 
       {error && <AppToast kind="error" message={error} onClose={() => setError('')} />}
       {notice && <AppToast kind="success" message={notice} onClose={() => setNotice('')} />}
 
+      {bankTab === 'transfer' && <>
       <div className="bank-metrics">
         <div><span>Nhân viên</span><strong>{rows.length}</strong></div>
         <div className={missing ? 'warning' : 'complete'}><span>Thiếu tài khoản</span><strong>{missing}</strong></div>
@@ -3190,7 +3583,176 @@ function BankPayrollView({ factory }: { factory: FactoryMode }) {
           </div>
         </div>
       </div>
+      </>}
+      {bankTab === 'accounts' && (
+        <BankAccountDirectory
+          key={factory}
+          overview={accountOverview}
+          activeCodes={activeCodes}
+          search={accountSearch}
+          loading={accountLoading}
+          onSearch={setAccountSearch}
+          onSaveAccount={saveDirectoryAccount}
+        />
+      )}
     </section>
+  )
+}
+
+function BankAccountDirectory({
+  overview,
+  activeCodes,
+  search,
+  loading,
+  onSearch,
+  onSaveAccount,
+}: {
+  overview: BankAccountOverview | null
+  activeCodes: Set<string> | null
+  search: string
+  loading: boolean
+  onSearch: (value: string) => void
+  onSaveAccount: (row: BankAccountDirectoryRow, accountNumber: string) => Promise<void>
+}) {
+  const [draftAccounts, setDraftAccounts] = useState<Record<string, string>>({})
+  const [savingCode, setSavingCode] = useState('')
+  const keyword = search.trim().toLowerCase()
+  const filteredRows = (overview?.accounts ?? []).filter((row) =>
+    !keyword || row.employee_code.toLowerCase().includes(keyword) || row.name.toLowerCase().includes(keyword),
+  )
+  const rows = [...filteredRows].sort((left, right) => {
+    if (!activeCodes) return Number(left.employee_code) - Number(right.employee_code)
+    const rank = (row: BankAccountDirectoryRow) => {
+      if (!activeCodes.has(row.employee_code)) return 2
+      return row.account_number ? 1 : 0
+    }
+    return rank(left) - rank(right) || Number(left.employee_code) - Number(right.employee_code)
+  })
+
+  async function saveRow(row: BankAccountDirectoryRow) {
+    setSavingCode(row.employee_code)
+    try {
+      await onSaveAccount(row, draftAccounts[row.employee_code] ?? '')
+    } finally {
+      setSavingCode('')
+    }
+  }
+
+  return (
+    <div className="bank-directory-card">
+      <div className="bank-directory-heading">
+        <div>
+          <p className="bank-eyebrow">Kho tài khoản độc lập theo xưởng</p>
+          <h3>Danh sách tài khoản ngân hàng</h3>
+          <p>Trước khi quét, đây là kho mã và tài khoản đã lưu. Sau khi quét, mã thiếu tài khoản sẽ được đưa lên trước.</p>
+        </div>
+        <input value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Tìm mã hoặc họ tên..." aria-label="Tìm tài khoản ngân hàng" />
+      </div>
+      <div className="bank-directory-metrics">
+        <span className="missing"><strong>{overview?.without_account ?? 0}</strong> chưa có tài khoản</span>
+        <span className="complete"><strong>{overview?.with_account ?? 0}</strong> đã có tài khoản</span>
+        <span><strong>{overview?.total ?? 0}</strong> nhân viên</span>
+      </div>
+      <div className="bank-directory-legend" aria-live="polite">
+        {!activeCodes ? <span><i className="warehouse" /> Chưa quét: kho tài khoản nền trắng</span> : <>
+          <span><i className="missing" /> Vàng: có làm tháng này, chưa có tài khoản</span>
+          <span><i className="complete" /> Xanh: có làm và đã có tài khoản</span>
+          <span><i className="inactive" /> Xám: không làm tháng này</span>
+        </>}
+      </div>
+      {loading ? (
+        <div className="bank-empty-state"><strong>Đang tải danh sách tài khoản...</strong><span>Đang đọc dữ liệu riêng của xưởng hiện tại.</span></div>
+      ) : !rows.length ? (
+        <div className="bank-empty-state"><strong>Chưa có nhân viên phù hợp</strong><span>Hãy lưu hồ sơ nhân viên trước hoặc nhập Word ở tab Danh sách chuyển lương.</span></div>
+      ) : (
+        <div className="bank-directory-table-wrap">
+          <table className="bank-table bank-directory-table">
+            <thead><tr><th>STT</th><th>Mã nhân viên</th><th>Họ và tên</th><th>Số tài khoản</th><th>Trạng thái</th></tr></thead>
+            <tbody>
+              {rows.map((row, index) => (
+                <tr
+                  key={row.employee_code}
+                  className={activeCodes
+                    ? activeCodes.has(row.employee_code)
+                      ? row.account_number ? 'bank-directory-active-complete' : 'bank-directory-active-missing'
+                      : 'bank-directory-inactive'
+                    : 'bank-directory-warehouse'}
+                >
+                  <td>{index + 1}</td>
+                  <td><strong>{row.employee_code}</strong></td>
+                  <td>{row.name || 'Chưa có tên'}</td>
+                  <td className="bank-directory-account bank-directory-edit-cell">
+                    <input
+                      inputMode="numeric"
+                      value={draftAccounts[row.employee_code] ?? row.account_number}
+                      placeholder="Chưa nhập"
+                      onChange={(event) => setDraftAccounts((current) => ({ ...current, [row.employee_code]: event.target.value.replace(/\D/g, '') }))}
+                      aria-label={`Số tài khoản mã ${row.employee_code}`}
+                    />
+                    <button
+                      type="button"
+                      className="bank-directory-save"
+                      disabled={savingCode === row.employee_code || (draftAccounts[row.employee_code] ?? row.account_number) === row.account_number}
+                      onClick={() => void saveRow(row)}
+                    >
+                      {savingCode === row.employee_code ? 'Đang lưu' : 'Lưu'}
+                    </button>
+                  </td>
+                  <td><span className={`bank-row-status${
+                    activeCodes && !activeCodes.has(row.employee_code)
+                      ? ' inactive'
+                      : activeCodes && row.account_number
+                        ? ' complete'
+                        : ''
+                  }`}>
+                    {!activeCodes ? 'Trong kho' : !activeCodes.has(row.employee_code) ? 'Không làm tháng này' : row.account_number ? 'Có thể nhận lương' : 'Cần bổ sung'}
+                  </span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function StartupLoadingView() {
+  return (
+    <main className="startup-screen" aria-busy="true" aria-live="polite">
+      <div className="startup-glow startup-glow-one" aria-hidden="true" />
+      <div className="startup-glow startup-glow-two" aria-hidden="true" />
+      <section className="startup-card">
+        <div className="startup-illustration" aria-hidden="true">
+          <div className="startup-logo">
+            <svg viewBox="0 0 24 24">
+              <path d="M7 2v3M17 2v3M3.5 9h17M5.5 4h13a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" />
+              <path d="m8 15 2.2 2.2L16.5 11" />
+            </svg>
+          </div>
+          <div className="startup-sheet">
+            <div className="startup-sheet-top"><i /><i /><i /></div>
+            <div className="startup-sheet-row active"><span /><b /></div>
+            <div className="startup-sheet-row"><span /><b /></div>
+            <div className="startup-sheet-row"><span /><b /></div>
+            <div className="startup-check">✓</div>
+          </div>
+          <span className="startup-float-dot dot-one" />
+          <span className="startup-float-dot dot-two" />
+        </div>
+        <div className="startup-copy">
+          <p className="startup-kicker"><i /> AttendanceSystem</p>
+          <h1>Đang chuẩn bị không gian làm việc</h1>
+          <p>Đang kết nối dữ liệu nhân viên và khôi phục phiên làm việc gần nhất.</p>
+          <div className="startup-progress" aria-hidden="true"><i /></div>
+          <div className="startup-status">
+            <span className="startup-spinner" aria-hidden="true" />
+            Vui lòng chờ trong giây lát…
+          </div>
+        </div>
+      </section>
+      <p className="startup-footnote">Quản lý chấm công • Bảng lương • Hồ sơ nhân viên</p>
+    </main>
   )
 }
 
@@ -3487,6 +4049,7 @@ function AttendanceView({
   showWorkDetail,
   showManualChecks,
   showEmployeeList,
+  showNewcomerBenefitReview,
 }: {
   data: AnalyzeResponse
   reviewItems: PayrollReviewItem[]
@@ -3494,6 +4057,7 @@ function AttendanceView({
   showWorkDetail: boolean
   showManualChecks: boolean
   showEmployeeList: boolean
+  showNewcomerBenefitReview: boolean
 }) {
   const [selectedCode, setSelectedCode] = useState(data.blocks[0]?.employee_code ?? '')
   const selectedBlock = data.blocks.find((block) => block.employee_code === selectedCode) ?? data.blocks[0]
@@ -3556,6 +4120,7 @@ function AttendanceView({
           title="Kiểm tra Output"
           items={reviewItems}
           firstWorkDays={firstWorkDays}
+          showNewcomerBenefitReview={showNewcomerBenefitReview}
           onChange={onReviewItemsChange}
         />
 
@@ -3598,36 +4163,79 @@ function AttendanceView({
 
 function EmployeeRegistryView({
   employees,
+  attendanceData,
   attendanceOverview,
   filterYear,
   filterMonth,
+  latestHistoryInfo,
+  knownHistoryCodes,
   selectedCode,
   form,
   loading,
+  cardExportLoading,
   onSelect,
   onCreate,
   onFilterYearChange,
   onFilterMonthChange,
   onFormChange,
   onSave,
+  onRequestOutput2Export,
+  onExportCards,
 }: {
   employees: PayrollEmployee[]
+  attendanceData: AnalyzeResponse | null
   attendanceOverview: AttendanceOverview | null
   filterYear: string
   filterMonth: string
+  latestHistoryInfo: LatestHistoryInfo
+  knownHistoryCodes: string[]
   selectedCode: string
   form: PayrollForm
   loading: boolean
+  cardExportLoading: boolean
   onSelect: (code: string) => void
   onCreate: () => void
   onFilterYearChange: (year: string) => void
   onFilterMonthChange: (month: string) => void
   onFormChange: (form: PayrollForm) => void
   onSave: () => void
+  onRequestOutput2Export: () => void
+  onExportCards: () => void
 }) {
   const [query, setQuery] = useState('')
+
+  if (attendanceData) {
+    return (
+      <section className="payroll-layout employee-overview-only">
+        <PayrollOverview
+          employees={employees}
+          attendanceData={attendanceData}
+          attendanceOverview={attendanceOverview}
+          filterYear={filterYear}
+          filterMonth={filterMonth}
+          latestHistoryInfo={latestHistoryInfo}
+          knownHistoryCodes={knownHistoryCodes}
+          selectedCode={selectedCode}
+          form={form}
+          loading={loading}
+          cardExportLoading={cardExportLoading}
+          overviewOnly
+          onSelect={onSelect}
+          onFilterYearChange={onFilterYearChange}
+          onFilterMonthChange={onFilterMonthChange}
+          onFormChange={onFormChange}
+          onSave={onSave}
+          onRequestOutput2Export={onRequestOutput2Export}
+          onExportCards={onExportCards}
+        />
+      </section>
+    )
+  }
+
   const normalizedQuery = query.trim().toLowerCase()
-  const monthEmployees = filterEmployeesByMonth(employees, attendanceOverview, filterYear, filterMonth)
+  // Hồ sơ nhân viên là dữ liệu dùng chung. Khi tháng được chọn chưa có bản
+  // chuyên cần, vẫn phải hiện các hồ sơ đã đồng bộ thay vì một danh sách rỗng.
+  const monthEmployees = filterEmployeesByMonth(employees, attendanceOverview, filterYear, filterMonth, true)
   const filteredEmployees = sortEmployeesForEntry(monthEmployees).filter((employee) => {
     if (!normalizedQuery) return true
     return (
@@ -3643,7 +4251,10 @@ function EmployeeRegistryView({
       <div className="panel employee-list">
         <div className="panel-heading">
           <h2>Danh sách nhân viên</h2>
-          <span>{filteredEmployees.length} mã</span>
+          <div className="employee-registry-heading-meta">
+            <span className="registry-sync-badge"><i />Đã đồng bộ {employees.length} hồ sơ</span>
+            <span>{filteredEmployees.length} mã</span>
+          </div>
         </div>
         <div className="employee-registry-toolbar">
           <EmployeeMonthControls
@@ -3680,7 +4291,7 @@ function EmployeeRegistryView({
 
       <div className="panel payroll-form employee-registry-form">
         <div className="panel-heading">
-          <h2>Thông tin nhân viên dùng chung</h2>
+          <h2>Thông tin nhân viên theo xưởng</h2>
           <span>{form.employee_code || 'Mã mới'}</span>
         </div>
         <div className="form-grid">
@@ -3754,27 +4365,25 @@ function EmployeeEntrySummary({ entered, missing }: { entered: number; missing: 
   )
 }
 
-function PayrollView({
+function PayrollOverview({
   employees,
   attendanceData,
   attendanceOverview,
   filterYear,
   filterMonth,
-  reviewItems,
   latestHistoryInfo,
   knownHistoryCodes,
   selectedCode,
   form,
   loading,
   cardExportLoading,
+  overviewOnly = false,
   onSelect,
   onFilterYearChange,
   onFilterMonthChange,
   onFormChange,
-  onReviewItemsChange,
-  onSavePatches,
   onSave,
-  onExport,
+  onRequestOutput2Export,
   onExportCards,
 }: {
   employees: PayrollEmployee[]
@@ -3782,21 +4391,19 @@ function PayrollView({
   attendanceOverview: AttendanceOverview | null
   filterYear: string
   filterMonth: string
-  reviewItems: PayrollReviewItem[]
   latestHistoryInfo: LatestHistoryInfo
   knownHistoryCodes: string[]
   selectedCode: string
   form: PayrollForm
   loading: boolean
   cardExportLoading: boolean
+  overviewOnly?: boolean
   onSelect: (code: string) => void
   onFilterYearChange: (year: string) => void
   onFilterMonthChange: (month: string) => void
   onFormChange: (form: PayrollForm) => void
-  onReviewItemsChange: (items: PayrollReviewItem[]) => void
-  onSavePatches: (updates: PayrollPatchUpdate[]) => Promise<void>
   onSave: () => void
-  onExport: () => void
+  onRequestOutput2Export: () => void
   onExportCards: () => void
 }) {
   const monthEmployees = filterEmployeesByMonth(
@@ -3807,31 +4414,27 @@ function PayrollView({
     isSamePeriod(filterYear, filterMonth, attendanceData.period),
   )
   const sortedEmployees = sortEmployeesForEntry(monthEmployees)
-  const firstWorkDays = firstWorkDaysByEmployee(attendanceData)
   const enteredCount = sortedEmployees.filter(isEmployeeProfileEntered).length
   const missingCount = sortedEmployees.length - enteredCount
   const latestCodeSet = new Set(latestHistoryInfo.employee_codes)
   const knownCodeSet = new Set(knownHistoryCodes)
   const isNewestPeriod = isAnalyzedPeriodNewest(attendanceData.period, latestHistoryInfo.period)
   const newEmployees = sortEmployeesByCode(
-    employees.filter(
-      (employee) =>
-        isNewestPeriod && !latestCodeSet.has(employee.employee_code),
-    ),
+    employees.filter((employee) => isNewestPeriod && !latestCodeSet.has(employee.employee_code)),
   ).map((employee): NewEmployeeItem => ({
     ...employee,
     novelty: knownCodeSet.has(employee.employee_code) ? 'returning' : 'first-time',
   }))
 
   return (
-    <section className="payroll-layout">
+    <>
       <nav className="payroll-tools">
         <a href="#payroll-info">Lương</a>
         <a href="#new-employees">Mới</a>
-        <a href="#payroll-review">Kiểm tra</a>
-        <a href="#bonus-entry">Thưởng</a>
-        <a href="#penalty-entry">Phạt</a>
-        <a href="#note-entry">Ghi chú</a>
+        {!overviewOnly && <a href="#payroll-review">Kiểm tra</a>}
+        {!overviewOnly && <a href="#bonus-entry">Thưởng</a>}
+        {!overviewOnly && <a href="#penalty-entry">Phạt</a>}
+        {!overviewOnly && <a href="#note-entry">Ghi chú</a>}
       </nav>
 
       <div className="panel employee-list">
@@ -3891,13 +4494,9 @@ function PayrollView({
         </div>
         <div className="payroll-actions">
           <button type="button" disabled={!selectedCode || loading} onClick={onSave}>Lưu thông tin lương</button>
-          <button type="button" disabled={loading} onClick={onExport}>Xuất Output 2</button>
+          <button type="button" disabled={loading} onClick={onRequestOutput2Export}>Xuất Output 2</button>
           <button type="button" disabled={loading || cardExportLoading} onClick={onExportCards}>
-            {attendanceData.factory === 'factory2'
-              ? 'Ảnh NV chưa có mẫu'
-              : cardExportLoading
-                ? 'Đang xuất ảnh...'
-                : 'Xuất ảnh bảng công NV'}
+            {cardExportLoading ? 'Đang xuất ảnh...' : 'Xuất ảnh bảng công NV'}
           </button>
         </div>
       </div>
@@ -3908,8 +4507,100 @@ function PayrollView({
         selectedCode={selectedCode}
         onSelect={onSelect}
       />
+    </>
+  )
+}
 
-      <PayrollReviewPanel items={reviewItems} firstWorkDays={firstWorkDays} onChange={onReviewItemsChange} />
+function PayrollView({
+  employees,
+  attendanceData,
+  attendanceOverview,
+  filterYear,
+  filterMonth,
+  reviewItems,
+  showNewcomerBenefitReview,
+  latestHistoryInfo,
+  knownHistoryCodes,
+  selectedCode,
+  form,
+  loading,
+  cardExportLoading,
+  manualEntryLocked,
+  onSelect,
+  onFilterYearChange,
+  onFilterMonthChange,
+  onFormChange,
+  onReviewItemsChange,
+  onSavePatches,
+  onSave,
+  onManualEntryBlocked,
+  onRequestOutput2Export,
+  onExportCards,
+}: {
+  employees: PayrollEmployee[]
+  attendanceData: AnalyzeResponse
+  attendanceOverview: AttendanceOverview | null
+  filterYear: string
+  filterMonth: string
+  reviewItems: PayrollReviewItem[]
+  showNewcomerBenefitReview: boolean
+  latestHistoryInfo: LatestHistoryInfo
+  knownHistoryCodes: string[]
+  selectedCode: string
+  form: PayrollForm
+  loading: boolean
+  cardExportLoading: boolean
+  manualEntryLocked: boolean
+  onSelect: (code: string) => void
+  onFilterYearChange: (year: string) => void
+  onFilterMonthChange: (month: string) => void
+  onFormChange: (form: PayrollForm) => void
+  onReviewItemsChange: (items: PayrollReviewItem[]) => void
+  onSavePatches: (updates: PayrollPatchUpdate[]) => Promise<void>
+  onSave: () => void
+  onManualEntryBlocked: () => void
+  onRequestOutput2Export: () => void
+  onExportCards: () => void
+}) {
+  const monthEmployees = filterEmployeesByMonth(
+    employees,
+    attendanceOverview,
+    filterYear,
+    filterMonth,
+    isSamePeriod(filterYear, filterMonth, attendanceData.period),
+  )
+  const sortedEmployees = sortEmployeesForEntry(monthEmployees)
+  const firstWorkDays = firstWorkDaysByEmployee(attendanceData)
+
+  return (
+    <section className="payroll-layout">
+      <PayrollOverview
+        employees={employees}
+        attendanceData={attendanceData}
+        attendanceOverview={attendanceOverview}
+        filterYear={filterYear}
+        filterMonth={filterMonth}
+        latestHistoryInfo={latestHistoryInfo}
+        knownHistoryCodes={knownHistoryCodes}
+        selectedCode={selectedCode}
+        form={form}
+        loading={loading}
+        cardExportLoading={cardExportLoading}
+        onSelect={onSelect}
+        onFilterYearChange={onFilterYearChange}
+        onFilterMonthChange={onFilterMonthChange}
+        onFormChange={onFormChange}
+        onSave={onSave}
+        onRequestOutput2Export={onRequestOutput2Export}
+        onExportCards={onExportCards}
+      />
+
+      <PayrollReviewPanel
+        items={reviewItems}
+        firstWorkDays={firstWorkDays}
+        showNewcomerBenefitReview={showNewcomerBenefitReview}
+        onChange={onReviewItemsChange}
+      />
 
       <BulkPayrollSection
         id="bonus-entry"
@@ -3917,6 +4608,8 @@ function PayrollView({
         field="bonus"
         employees={sortedEmployees}
         loading={loading}
+        manualEntryLocked={manualEntryLocked}
+        onManualEntryBlocked={onManualEntryBlocked}
         onApply={onSavePatches}
       />
       <BulkPayrollSection
@@ -3925,6 +4618,8 @@ function PayrollView({
         field="advance_or_penalty"
         employees={sortedEmployees}
         loading={loading}
+        manualEntryLocked={manualEntryLocked}
+        onManualEntryBlocked={onManualEntryBlocked}
         onApply={onSavePatches}
       />
       <BulkPayrollSection
@@ -3933,6 +4628,8 @@ function PayrollView({
         field="note"
         employees={sortedEmployees}
         loading={loading}
+        manualEntryLocked={manualEntryLocked}
+        onManualEntryBlocked={onManualEntryBlocked}
         onApply={onSavePatches}
       />
     </section>
@@ -3959,27 +4656,31 @@ function PayrollReviewPanel({
   title = 'Kiểm tra Output',
   items,
   firstWorkDays,
+  showNewcomerBenefitReview,
   onChange,
 }: {
   id?: string
   title?: string
   items: PayrollReviewItem[]
   firstWorkDays: Record<string, number>
+  showNewcomerBenefitReview: boolean
   onChange: (items: PayrollReviewItem[]) => void
 }) {
   const [viewMode, setViewMode] = useState<'pending' | 'history' | 'all'>('pending')
-  const pendingCount = items.filter((item) => item.status === 'pending').length
-  const historyAppliedCount = items.filter((item) => item.origin === 'history-applied').length
-  const ruleChangedCount = items.filter((item) => item.type === 'rule_change').length
-  const newcomerReviewCount = items.filter((item) => item.novelty).length
-  const reviewTypesByKey = items.reduce<Record<string, Set<'missing' | 'late'>>>((acc, item) => {
+  const displayedItems = items.filter((item) => showNewcomerBenefitReview || item.type !== 'newcomer_benefit')
+  const pendingCount = displayedItems.filter((item) => item.status === 'pending').length
+  const historyAppliedCount = displayedItems.filter((item) => item.origin === 'history-applied').length
+  const ruleChangedCount = displayedItems.filter((item) => item.type === 'rule_change').length
+  const newcomerReviewCount = displayedItems.filter((item) => item.novelty).length
+  const newcomerBenefitCount = displayedItems.filter((item) => item.type === 'newcomer_benefit').length
+  const reviewTypesByKey = displayedItems.reduce<Record<string, Set<'missing' | 'late'>>>((acc, item) => {
     if (item.type !== 'missing' && item.type !== 'late') return acc
     const key = reviewPairKey(item)
     acc[key] ??= new Set()
     acc[key].add(item.type)
     return acc
   }, {})
-  const pairedReviewOrder = items.reduce<string[]>((order, item) => {
+  const pairedReviewOrder = displayedItems.reduce<string[]>((order, item) => {
     const key = reviewPairKey(item)
     const isPaired = reviewTypesByKey[key]?.has('missing') && reviewTypesByKey[key]?.has('late')
     if (isPaired && !order.includes(key)) order.push(key)
@@ -3988,16 +4689,16 @@ function PayrollReviewPanel({
   const pairedReviewKeys = new Set(pairedReviewOrder)
   const pairedReviewRanks = new Map(pairedReviewOrder.map((key, index) => [key, index]))
   const pendingPairKeys = new Set(
-    items
+    displayedItems
       .filter((item) => item.status === 'pending' && pairedReviewKeys.has(reviewPairKey(item)))
       .map((item) => reviewPairKey(item)),
   )
   const visibleItems =
     viewMode === 'pending'
-      ? items.filter((item) => item.status === 'pending' || pendingPairKeys.has(reviewPairKey(item)))
+      ? displayedItems.filter((item) => item.status === 'pending' || pendingPairKeys.has(reviewPairKey(item)))
       : viewMode === 'history'
-        ? items.filter((item) => item.origin === 'history-applied')
-        : items
+        ? displayedItems.filter((item) => item.origin === 'history-applied')
+        : displayedItems
   const sortReviewItems = (source: PayrollReviewItem[]) =>
     source
       .map((item, index) => ({ item, index }))
@@ -4010,13 +4711,18 @@ function PayrollReviewPanel({
   const missingItems = sortReviewItems(visibleItems.filter((item) => item.type === 'missing'))
   const lateItems = sortReviewItems(visibleItems.filter((item) => item.type === 'late'))
   const ruleChangeItems = visibleItems.filter((item) => item.type === 'rule_change')
-  const pairedStatuses = items.reduce<Record<string, Partial<Record<'missing' | 'late', PayrollReviewStatus>>>>((statuses, item) => {
+  const newcomerBenefitItems = visibleItems.filter((item) => item.type === 'newcomer_benefit')
+  const pairedStatuses = displayedItems.reduce<Record<string, Partial<Record<'missing' | 'late', PayrollReviewStatus>>>>((statuses, item) => {
     const key = reviewPairKey(item)
     if (!pairedReviewKeys.has(key) || (item.type !== 'missing' && item.type !== 'late')) return statuses
     statuses[key] ??= {}
     statuses[key][item.type] = item.status
     return statuses
   }, {})
+  const isSectionComplete = (type: PayrollReviewType) => {
+    const sectionItems = displayedItems.filter((item) => item.type === type)
+    return viewMode === 'pending' && sectionItems.length > 0 && sectionItems.every((item) => item.status !== 'pending')
+  }
 
   useEffect(() => {
     const legacySelectedKeys = new Set(
@@ -4112,7 +4818,7 @@ function PayrollReviewPanel({
           Đã áp dụng từ lịch sử {historyAppliedCount}
         </button>
         <button type="button" className={viewMode === 'all' ? 'active' : ''} onClick={() => setViewMode('all')}>
-          Tất cả {items.length}
+          Tất cả {displayedItems.length}
         </button>
       </div>
       {ruleChangedCount > 0 && (
@@ -4123,6 +4829,11 @@ function PayrollReviewPanel({
       {newcomerReviewCount > 0 && (
         <div className="panel-note review-priority-note">
           <span><i className="legend-dot first-time-dot" />Dòng vàng là mã mới lần đầu hoặc quay lại, nên kiểm tra kỹ.</span>
+        </div>
+      )}
+      {newcomerBenefitCount > 0 && (
+        <div className="panel-note review-priority-note">
+          <span>Có {newcomerBenefitCount} ca được tự cộng công theo diện nhân viên mới; hãy xác nhận hoặc sửa công trước khi lưu.</span>
         </div>
       )}
       {pairedReviewKeys.size > 0 && (
@@ -4141,6 +4852,7 @@ function PayrollReviewPanel({
           onConfirm={confirmItem}
           onEdit={editItem}
           onUpdate={updateItem}
+          completed={isSectionComplete('missing')}
         />
         <ReviewTable
           title="Đi trễ"
@@ -4152,6 +4864,20 @@ function PayrollReviewPanel({
           onConfirm={confirmItem}
           onEdit={editItem}
           onUpdate={updateItem}
+          completed={isSectionComplete('late')}
+        />
+        <ReviewTable
+          title="Ca tự cộng nhân viên mới"
+          valueLabel="Tự động cộng"
+          items={newcomerBenefitItems}
+          pairedReviewKeys={pairedReviewKeys}
+          pairedStatuses={pairedStatuses}
+          firstWorkDays={firstWorkDays}
+          onConfirm={confirmItem}
+          onEdit={editItem}
+          onUpdate={updateItem}
+          completed={isSectionComplete('newcomer_benefit')}
+          layoutClassName="review-table-newcomer"
         />
         <ReviewTable
           title="Đổi công do rule"
@@ -4163,6 +4889,8 @@ function PayrollReviewPanel({
           onConfirm={confirmItem}
           onEdit={editItem}
           onUpdate={updateItem}
+          completed={isSectionComplete('rule_change')}
+          layoutClassName="review-table-rule"
         />
       </div>
     </div>
@@ -4225,6 +4953,8 @@ function BulkPayrollSection({
   field,
   employees,
   loading,
+  manualEntryLocked,
+  onManualEntryBlocked,
   onApply,
 }: {
   id: string
@@ -4232,6 +4962,8 @@ function BulkPayrollSection({
   field: BulkPayrollField
   employees: PayrollEmployee[]
   loading: boolean
+  manualEntryLocked: boolean
+  onManualEntryBlocked: () => void
   onApply: (updates: PayrollPatchUpdate[]) => Promise<void>
 }) {
   const [query, setQuery] = useState('')
@@ -4276,6 +5008,10 @@ function BulkPayrollSection({
   })
 
   function updateDraft(employeeCode: string, value: string) {
+    if (manualEntryLocked) {
+      onManualEntryBlocked()
+      return
+    }
     setLocked(false)
     setDrafts((current) => ({ ...current, [employeeCode]: value }))
   }
@@ -4406,6 +5142,8 @@ function ReviewTable({
   onConfirm,
   onEdit,
   onUpdate,
+  completed = false,
+  layoutClassName = '',
 }: {
   title: string
   valueLabel: string
@@ -4416,14 +5154,26 @@ function ReviewTable({
   onConfirm: (id: string) => void
   onEdit: (id: string) => void
   onUpdate: (id: string, patch: Partial<Pick<PayrollReviewItem, 'value' | 'work_value'>>) => void
+  completed?: boolean
+  layoutClassName?: string
 }) {
+  if (!items.length && !completed) return null
+
   return (
-    <div className="review-table">
+    <div className={`review-table ${layoutClassName}`.trim()}>
       <div className="review-title">
         <strong>{title}</strong>
-        <span>{items.length} dòng</span>
+        <span>{completed ? 'Đã xong' : `${items.length} dòng`}</span>
       </div>
-      <div className="table-wrap">
+      {completed ? (
+        <div className="review-complete-state" role="status">
+          <span className="review-complete-icon" aria-hidden="true">✓</span>
+          <div>
+            <strong>Đã kiểm tra xong</strong>
+            <span>Tất cả dòng trong mục này đã được xác nhận.</span>
+          </div>
+        </div>
+      ) : <div className="table-wrap">
         <table>
           <thead>
             <tr>
@@ -4442,7 +5192,7 @@ function ReviewTable({
               const isPairedReview = pairedReviewKeys.has(pairKey)
               const isFirstWorkDayReview = item.status === 'pending' && item.novelty === 'first-time' && (item.type === 'missing' || item.type === 'late') && firstWorkDays[item.employee_code] === item.day
               const peerType = item.type === 'missing' ? 'late' : 'missing'
-              const currentReviewed = isPairedReview && item.status !== 'pending'
+              const currentReviewed = item.status !== 'pending'
               const peerReviewed = isPairedReview && pairedStatuses[pairKey]?.[peerType] !== 'pending'
               const needsPairCheck = isPairedReview && item.status === 'pending' && peerReviewed
               return (
@@ -4478,10 +5228,10 @@ function ReviewTable({
                 </td>
                 <td>
                   <input
-                    className="table-input"
+                    className={`table-input${item.type === 'newcomer_benefit' ? ' newcomer-benefit-input' : ''}`}
                     value={item.value}
                     placeholder="Xóa"
-                    disabled={currentReviewed}
+                    disabled={currentReviewed || item.type === 'newcomer_benefit'}
                     onChange={(event) => onUpdate(item.id, { value: event.target.value })}
                   />
                 </td>
@@ -4523,7 +5273,7 @@ function ReviewTable({
             )}
           </tbody>
         </table>
-      </div>
+      </div>}
     </div>
   )
 }
@@ -4548,6 +5298,8 @@ function HistoryView({
   onSaveEmployee,
   onDownloadOutput,
   onDownloadFinalCopy,
+  onDownloadEmployeeImages,
+  onDownloadFinalCopyEmployeeImages,
 }: {
   periods: HistoryPeriod[]
   finalCopies: HistoryFinalCopy[]
@@ -4568,6 +5320,8 @@ function HistoryView({
   onSaveEmployee: (periodId: string, employeeCode: string, draft: HistoryEmployeeDraft) => Promise<void>
   onDownloadOutput: (periodId: string, kind: 'output1' | 'output2') => Promise<void>
   onDownloadFinalCopy: (copyId: string, kind: 'output1' | 'output2') => Promise<void>
+  onDownloadEmployeeImages: (periodId: string, kind?: 'output1' | 'output2') => Promise<void>
+  onDownloadFinalCopyEmployeeImages: (copyId: string, kind?: 'output1' | 'output2') => Promise<void>
 }) {
   const [detailMode, setDetailMode] = useState(false)
   const [reviewMode, setReviewMode] = useState(false)
@@ -4823,6 +5577,8 @@ function HistoryView({
           reviewSummary={reviewSummary}
           onDownloadOutput={onDownloadOutput}
           onDownloadFinalCopy={onDownloadFinalCopy}
+          onDownloadEmployeeImages={onDownloadEmployeeImages}
+          onDownloadFinalCopyEmployeeImages={onDownloadFinalCopyEmployeeImages}
           onSelectPeriod={onSelectPeriod}
           onSelectFinalCopy={onSelectFinalCopy}
           onOpenReview={() => {
@@ -4937,6 +5693,8 @@ function HistoryPeriodActionBar({
   reviewSummary,
   onDownloadOutput,
   onDownloadFinalCopy,
+  onDownloadEmployeeImages,
+  onDownloadFinalCopyEmployeeImages,
   onSelectPeriod,
   onSelectFinalCopy,
   onOpenReview,
@@ -4949,10 +5707,13 @@ function HistoryPeriodActionBar({
   reviewSummary: { confirmed: number; total: number }
   onDownloadOutput: (periodId: string, kind: 'output1' | 'output2') => Promise<void>
   onDownloadFinalCopy: (copyId: string, kind: 'output1' | 'output2') => Promise<void>
+  onDownloadEmployeeImages: (periodId: string, kind?: 'output1' | 'output2') => Promise<void>
+  onDownloadFinalCopyEmployeeImages: (copyId: string, kind?: 'output1' | 'output2') => Promise<void>
   onSelectPeriod: (periodId: string) => void
   onSelectFinalCopy: (copyId: string) => void
   onOpenReview: () => void
 }) {
+  const [imageChoiceOpen, setImageChoiceOpen] = useState(false)
   const title = finalCopy
     ? `Dang xem: ${finalCopy.label}`
     : detail
@@ -4965,6 +5726,25 @@ function HistoryPeriodActionBar({
       : 'Chon mot ky ben trai de xuat file hoac ra soat xac nhan.'
 
   return (
+    <>
+    {imageChoiceOpen && (
+      <div className="export-choice-backdrop" role="presentation" onMouseDown={() => setImageChoiceOpen(false)}>
+        <section className="export-choice-dialog employee-card-choice-dialog" role="dialog" aria-modal="true" aria-labelledby="history-image-choice-title" onMouseDown={(event) => event.stopPropagation()}>
+          <p className="export-choice-kicker">Ảnh bảng công nhân viên</p>
+          <h2 id="history-image-choice-title">Chọn Output cần chụp</h2>
+          <p>Output 2 sẽ lấy cả vùng ngày công và khu vực lương trong ảnh.</p>
+          <div className="export-choice-options">
+            <button type="button" className="export-choice-card" onClick={() => { setImageChoiceOpen(false); if (finalCopy) void onDownloadFinalCopyEmployeeImages(finalCopy.id, 'output1'); else if (detail) void onDownloadEmployeeImages(detail.period.id, 'output1') }}>
+              <strong>Ảnh Output 1</strong><span>Chỉ phần chấm công và thông tin nhân viên.</span>
+            </button>
+            <button type="button" className="export-choice-card formula-only" onClick={() => { setImageChoiceOpen(false); if (finalCopy) void onDownloadFinalCopyEmployeeImages(finalCopy.id, 'output2'); else if (detail) void onDownloadEmployeeImages(detail.period.id, 'output2') }}>
+              <strong>Ảnh Output 2</strong><span>Phần chấm công cùng toàn bộ khu vực lương.</span>
+            </button>
+          </div>
+          <button type="button" className="secondary-button export-choice-cancel" onClick={() => setImageChoiceOpen(false)}>Hủy</button>
+        </section>
+      </div>
+    )}
     <div className="history-period-actionbar">
       <div className="history-period-context">
         <strong>{title}</strong>
@@ -5023,11 +5803,20 @@ function HistoryPeriodActionBar({
         >
           Output 2
         </button>
+        <button
+          type="button"
+          className="secondary-button history-image-export"
+          disabled={loading || (!detail && !finalCopy)}
+          onClick={() => setImageChoiceOpen(true)}
+        >
+          Ảnh bảng công
+        </button>
         <button type="button" disabled={loading || !detail || Boolean(finalCopy)} onClick={onOpenReview}>
           Rà soát xác nhận
         </button>
       </div>
     </div>
+    </>
   )
 }
 
@@ -5882,8 +6671,9 @@ function isEmptyPayrollFieldValue(value: string, field: BulkPayrollField) {
   return Number(value || 0) === 0
 }
 
-function payrollPayload(form: PayrollForm) {
+function payrollPayload(form: PayrollForm, factory: FactoryMode) {
   return {
+    factory,
     employee_code: form.employee_code,
     name: form.name,
     start_work_note: form.start_work_note,
@@ -6116,6 +6906,21 @@ function sortEmployeesByCode(employees: PayrollEmployee[]) {
   return [...employees].sort((left, right) => compareEmployeeCode(left.employee_code, right.employee_code))
 }
 
+function mergeEmployeeLists(registry: PayrollEmployee[], currentPayroll: PayrollEmployee[]) {
+  const merged = new Map<string, PayrollEmployee>()
+  for (const employee of currentPayroll) {
+    if (employee.employee_code) merged.set(employee.employee_code, employee)
+  }
+  for (const employee of registry) {
+    if (!employee.employee_code) continue
+    const current = merged.get(employee.employee_code)
+    // The registry is the profile source, while the current Output 2 supplies
+    // work hours and rows that have not yet been stored as a profile.
+    merged.set(employee.employee_code, current ? { ...current, ...employee } : employee)
+  }
+  return sortEmployeesByCode([...merged.values()])
+}
+
 function filterEmployeesByMonth(
   employees: PayrollEmployee[],
   overview: AttendanceOverview | null,
@@ -6213,6 +7018,16 @@ function buildPayrollReviewItems(
         status: 'pending' as PayrollReviewStatus,
       }
       const items: PayrollReviewItem[] = []
+      if (result.newcomer_benefit) {
+        items.push({
+          ...base,
+          id: `newcomer-benefit-${block.employee_code}-${result.day}`,
+          type: 'newcomer_benefit',
+          original_value: 'Đã cộng',
+          value: 'Đã cộng',
+          messages: [...messages, result.newcomer_benefit],
+        })
+      }
       if (result.missing_count === '?' && !hideZeroWorkReview) {
         items.push({
           ...base,
@@ -6277,7 +7092,13 @@ function reconcileTemporaryReviewItems(
     if (recalculated) {
       const valueChanged = String(savedItem.value ?? '') !== String(savedItem.original_value ?? '')
       const workValueChanged = String(savedItem.work_value ?? '') !== String(savedItem.original_work_value ?? '')
-      if (!valueChanged && !workValueChanged) return derivedItem
+      if (!valueChanged && !workValueChanged) {
+        return {
+          ...derivedItem,
+          status: savedItem.status,
+          pair_selected: savedItem.pair_selected,
+        }
+      }
       return {
         ...derivedItem,
         value: valueChanged ? savedItem.value : derivedItem.value,
@@ -6307,7 +7128,7 @@ function applyReviewMemory(
   historyMatchesPunches: boolean,
   historyPeriodLabel: string,
 ): PayrollReviewItem {
-  if (!history || !historyMatchesPunches || item.type === 'rule_change' || !history.review_notes.length) {
+  if (!history || !historyMatchesPunches || item.type === 'rule_change' || item.type === 'newcomer_benefit' || !history.review_notes.length) {
     return item
   }
 
@@ -6416,6 +7237,7 @@ function reviewStatusLabel(status: PayrollReviewStatus) {
 function reviewTypeLabel(type: PayrollReviewType) {
   if (type === 'missing') return 'Quên bấm / chưa rõ'
   if (type === 'late') return 'Đi trễ'
+  if (type === 'newcomer_benefit') return 'Ca tự cộng nhân viên mới'
   return 'Đổi công do rule'
 }
 
@@ -6552,15 +7374,26 @@ function downloadBlob(blob: Blob, filename: string) {
   const link = document.createElement('a')
   link.href = url
   link.download = filename
+  link.style.display = 'none'
+  document.body.appendChild(link)
   link.click()
-  URL.revokeObjectURL(url)
+  // Keep the object URL alive long enough for Chromium/Edge to start the
+  // download. Revoking it immediately can leave the success toast visible
+  // while no file is actually written to Downloads.
+  window.setTimeout(() => {
+    link.remove()
+    URL.revokeObjectURL(url)
+  }, 1500)
 }
 
 function downloadFromUrl(url: string, filename: string) {
   const link = document.createElement('a')
   link.href = url
   link.download = filename
+  link.style.display = 'none'
+  document.body.appendChild(link)
   link.click()
+  window.setTimeout(() => link.remove(), 1500)
 }
 
 function withDownloadToken(url: string, token: string) {
@@ -6583,26 +7416,32 @@ function readSmartSettings() {
       smartScan?: boolean
       smartMapping?: boolean
       newcomerBenefit?: boolean
+      showNewcomerBenefitReview?: boolean
       showWorkDetail?: boolean
       showManualChecks?: boolean
       showEmployeeList?: boolean
+      manualEntryLocked?: boolean
     }
     return {
       smartScan: saved.smartScan ?? true,
       smartMapping: saved.smartMapping ?? true,
       newcomerBenefit: saved.newcomerBenefit ?? false,
+      showNewcomerBenefitReview: saved.showNewcomerBenefitReview ?? true,
       showWorkDetail: saved.showWorkDetail ?? true,
       showManualChecks: saved.showManualChecks ?? true,
       showEmployeeList: saved.showEmployeeList ?? true,
+      manualEntryLocked: saved.manualEntryLocked ?? false,
     }
   } catch {
     return {
       smartScan: true,
       smartMapping: true,
       newcomerBenefit: false,
+      showNewcomerBenefitReview: true,
       showWorkDetail: true,
       showManualChecks: true,
       showEmployeeList: true,
+      manualEntryLocked: false,
     }
   }
 }

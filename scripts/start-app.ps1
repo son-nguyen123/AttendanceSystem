@@ -14,6 +14,8 @@ $BackendOut = Join-Path $LogDir "backend.out.log"
 $BackendErr = Join-Path $LogDir "backend.err.log"
 $AppUrl = "http://127.0.0.1:5173/"
 $ApiUrl = "http://127.0.0.1:8000/health"
+$SplashPath = Join-Path $PSScriptRoot "attendance-splash.hta"
+$splashProcess = $null
 
 function Test-PortListening {
     param([int]$Port)
@@ -65,6 +67,15 @@ function Start-Backend {
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
+if (Test-Path $SplashPath) {
+    try {
+        $splashProcess = Start-Process -FilePath "mshta.exe" -ArgumentList @($SplashPath) -PassThru
+    } catch {
+        # The application can still start on Windows editions without HTA.
+        $splashProcess = $null
+    }
+}
+
 if (-not (Test-Path $PythonExe)) {
     throw "Khong tim thay Python. Hay chay setup.bat truoc, hoac kiem tra backend\.venv."
 }
@@ -96,9 +107,19 @@ $backendReady = Wait-HttpOk -Url $ApiUrl -Seconds 30
 $frontendReady = Wait-HttpOk -Url $AppUrl -Seconds 30
 
 if ($backendReady -and $frontendReady) {
+    if ($splashProcess -and -not $splashProcess.HasExited) {
+        $splashProcess.CloseMainWindow() | Out-Null
+        Start-Sleep -Milliseconds 200
+        if (-not $splashProcess.HasExited) { Stop-Process -Id $splashProcess.Id -Force }
+    }
     Start-Process $AppUrl
     Write-Host "Attendance System da san sang: $AppUrl"
 } else {
+    if ($splashProcess -and -not $splashProcess.HasExited) {
+        $splashProcess.CloseMainWindow() | Out-Null
+        Start-Sleep -Milliseconds 200
+        if (-not $splashProcess.HasExited) { Stop-Process -Id $splashProcess.Id -Force }
+    }
     Write-Host "Server chua san sang hoan toan."
     Write-Host "Backend ready: $backendReady"
     Write-Host "Frontend ready: $frontendReady"

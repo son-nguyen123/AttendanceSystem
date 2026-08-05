@@ -119,6 +119,7 @@ def preview_factory2_payroll(
     source_path: Path,
     review_overrides: list[dict] | None = None,
     profile_codes: set[str] | None = None,
+    factory: str = "factory2",
 ) -> dict:
     employees, sheet_name, _period, _employee_counts = _read_active_employees(
         source_path,
@@ -126,7 +127,7 @@ def preview_factory2_payroll(
     )
     return {
         "sheet_name": sheet_name,
-        "employees": [_build_employee_preview(employee, profile_codes=profile_codes) for employee in employees],
+        "employees": [_build_employee_preview(employee, profile_codes=profile_codes, factory=factory) for employee in employees],
     }
 
 
@@ -134,13 +135,14 @@ def export_factory2_output1(
     source_path: Path,
     output_path: Path,
     review_overrides: list[dict] | None = None,
+    factory: str = "factory2",
 ) -> Path:
     with NamedTemporaryFile(suffix=".xlsx", delete=False) as temp_file:
         temp_source = Path(temp_file.name)
 
     try:
         _write_factory1_shaped_source(source_path, temp_source)
-        return export_processed_workbook(temp_source, output_path, review_overrides=review_overrides)
+        return export_processed_workbook(temp_source, output_path, review_overrides=review_overrides, factory=factory)
     finally:
         temp_source.unlink(missing_ok=True)
 
@@ -151,6 +153,7 @@ def export_factory2_output2(
     review_overrides: list[dict] | None = None,
     include_saved_data: bool = True,
     profile_codes: set[str] | None = None,
+    factory: str = "factory2",
 ) -> Path:
     with NamedTemporaryFile(suffix=".xlsx", delete=False) as temp_file:
         temp_source = Path(temp_file.name)
@@ -163,6 +166,7 @@ def export_factory2_output2(
             review_overrides=review_overrides,
             include_saved_data=include_saved_data,
             profile_codes=profile_codes,
+            factory=factory,
         )
     finally:
         temp_source.unlink(missing_ok=True)
@@ -474,8 +478,12 @@ def _empty_day_result(value: date) -> dict:
     }
 
 
-def _build_employee_preview(employee: Factory2Employee, profile_codes: set[str] | None = None) -> dict:
-    entry = get_payroll_entry(employee.employee_code)
+def _build_employee_preview(
+    employee: Factory2Employee,
+    profile_codes: set[str] | None = None,
+    factory: str = "factory2",
+) -> dict:
+    entry = get_payroll_entry(employee.employee_code, factory)
     if profile_codes is not None and employee.employee_code not in profile_codes:
         entry = PayrollEntry()
     total_hours = _employee_total_hours(employee)

@@ -4,7 +4,7 @@ $Root = Split-Path -Parent $PSScriptRoot
 $AssetsDir = Join-Path $Root "assets"
 $IconPath = Join-Path $AssetsDir "attendance.ico"
 $ShortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "Attendance System.lnk"
-$StartBat = Join-Path $Root "start.bat"
+$StartLauncher = Join-Path $Root "scripts\start-hidden.vbs"
 
 New-Item -ItemType Directory -Force -Path $AssetsDir | Out-Null
 
@@ -37,7 +37,8 @@ if (-not (Test-Path $IconPath)) {
 
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($ShortcutPath)
-$shortcut.TargetPath = $StartBat
+$shortcut.TargetPath = Join-Path $env:SystemRoot "System32\wscript.exe"
+$shortcut.Arguments = "`"$StartLauncher`""
 $shortcut.WorkingDirectory = $Root
 $shortcut.IconLocation = $IconPath
 $shortcut.Description = "Open Attendance System"

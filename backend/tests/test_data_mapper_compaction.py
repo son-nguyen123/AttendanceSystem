@@ -1,5 +1,6 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
 import sys
 import unittest
 
@@ -16,6 +17,7 @@ from app.services.data_mapper import (
     _write_reformed_owner_area,
     map_owner_data_to_current_workbook,
 )
+from app.services import bank_account_store
 
 
 class DataMapperCompactionTests(unittest.TestCase):
@@ -89,6 +91,7 @@ class DataMapperNumberFormatTests(unittest.TestCase):
             previous_sheet["O12"] = 3_850_000
             previous_sheet["V12"] = 200_000
             previous_sheet["AB12"] = 500_000
+            previous_sheet["K11"] = "8829125020"
             previous_sheet["K13"] = "Bắt đầu làm từ tháng 6"
             previous_workbook.save(previous_path)
             previous_workbook.close()
@@ -102,12 +105,21 @@ class DataMapperNumberFormatTests(unittest.TestCase):
             finally:
                 check_workbook.close()
 
-            summary = map_owner_data_to_current_workbook(
-                current_path,
-                previous_path,
-                output_path,
-                mode="output2",
+            original_registry_path = bank_account_store.REGISTRY_PATH
+            bank_account_store.REGISTRY_PATH = root / "bank_accounts.json"
+            bank_account_store.REGISTRY_PATH.write_text(
+                json.dumps({"factory1:1006": {"factory": "factory1", "employee_code": "1006", "account_number": "5601884980"}}),
+                encoding="utf-8",
             )
+            try:
+                summary = map_owner_data_to_current_workbook(
+                    current_path,
+                    previous_path,
+                    output_path,
+                    mode="output2",
+                )
+            finally:
+                bank_account_store.REGISTRY_PATH = original_registry_path
             mapped = load_workbook(output_path, data_only=False)
             try:
                 sheet = mapped.active
@@ -117,7 +129,9 @@ class DataMapperNumberFormatTests(unittest.TestCase):
                 self.assertEqual(sheet["AO9"].value, 200_000)
                 self.assertEqual(sheet["AQ9"].value, "?")
                 self.assertEqual(sheet["AQ9"].fill.fgColor.rgb, "00C4D79B")
+                self.assertEqual(sheet["AI8"].value, "5601884980")
                 self.assertEqual(sheet["AI10"].value, "Bắt đầu làm từ tháng 6")
+                self.assertIn("AJ10:AR10", {str(item) for item in sheet.merged_cells.ranges})
             finally:
                 mapped.close()
 
@@ -148,8 +162,11 @@ class DataMapperNumberFormatTests(unittest.TestCase):
                 self.assertEqual(sheet[coordinate].number_format, "General")
             for coordinate in ("AJ9", "AK9", "AL9", "AO9", "AP9", "AQ9", "AR9"):
                 self.assertEqual(sheet[coordinate].number_format, "#,##0")
-            self.assertIn("AI10:AR10", {str(item) for item in sheet.merged_cells.ranges})
-            self.assertEqual(sheet["AI10"].fill.fgColor.rgb, "00FFF4CC")
+            self.assertEqual(sheet["AJ9"].font.color.rgb, "00000000")
+            self.assertIn("AJ10:AR10", {str(item) for item in sheet.merged_cells.ranges})
+            self.assertEqual(sheet["AI10"].fill.fgColor.rgb, "00DDEBF7")
+            self.assertTrue(sheet["AI10"].font.bold)
+            self.assertEqual(sheet["AJ10"].font.color.rgb, "00C00000")
         finally:
             source_workbook.close()
             source_values_workbook.close()

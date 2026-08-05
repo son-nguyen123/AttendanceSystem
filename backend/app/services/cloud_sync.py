@@ -366,9 +366,18 @@ def run_final_excel_copy(
     month: int,
     year: int,
     factory: str = "factory1",
+    profile_sync_mode: str = "replace_manual",
 ) -> dict[str, Any]:
     config = _read_config()
-    result = create_final_excel_copy(config, source_path, original_filename, month, year, factory=factory)
+    result = create_final_excel_copy(
+        config,
+        source_path,
+        original_filename,
+        month,
+        year,
+        factory=factory,
+        profile_sync_mode=profile_sync_mode,
+    )
     _update_config(last_backup_at=_now(), last_backup_path=result["path"], last_backup_error=None)
     return result
 

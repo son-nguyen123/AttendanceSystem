@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import hashlib
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -21,6 +22,7 @@ from app.services.cloud_sync import (
     sync_period_detail,
 )
 from app.services.final_copy_export import export_final_copy_output1
+from app.services.employee_cards import export_employee_screenshots_from_workbook
 from app.services.factory2_workbook import write_factory2_standard_source
 from app.services.history_store import (
     delete_period,
@@ -272,6 +274,37 @@ def download_history_file(period_id: str, kind: str, user: dict = Depends(requir
     )
 
 
+@router.get("/periods/{period_id}/employee-images/{kind}")
+def download_history_employee_images(period_id: str, kind: str, user: dict = Depends(require_owner)) -> FileResponse:
+    if kind not in {"output1", "output2"}:
+        raise HTTPException(status_code=400, detail="Loại ảnh bảng công không hợp lệ")
+    try:
+        source_path = get_period_file(period_id, kind)
+        detail = get_period_detail(period_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Không tìm thấy kỳ chấm công") from exc
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    output_dir = STORAGE_DIR / "exports" / "history_employee_images"
+    output_path = output_dir / f"{period_id}_{kind}.zip"
+    try:
+        if not _is_fresh_export(output_path, source_path):
+            export_employee_screenshots_from_workbook(source_path, output_path, kind)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Không xuất được ảnh bảng công từ lịch sử: {exc}") from exc
+
+    period = detail.get("period") or {}
+    factory_label = "Xuong2" if period.get("factory") == "factory2" else "Xuong1"
+    month = int(period.get("month") or 0)
+    year = int(period.get("year") or 0)
+    return FileResponse(
+        output_path,
+        media_type="application/zip",
+        filename=f"{factory_label}_{year}-{month:02d}_AnhBangCongNhanVien_{kind}.zip",
+    )
+
+
 @router.get("/final-copies/{copy_id}/download/{kind}")
 def download_final_copy_file(copy_id: str, kind: str, user: dict = Depends(require_owner)) -> FileResponse:
     if kind not in {"output1", "output2"}:
@@ -299,6 +332,54 @@ def download_final_copy_file(copy_id: str, kind: str, user: dict = Depends(requi
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename="Output1.xlsx",
     )
+
+
+@router.get("/final-copies/{copy_id}/employee-images")
+def download_final_copy_employee_images(copy_id: str, user: dict = Depends(require_owner)) -> FileResponse:
+    return _download_final_copy_employee_images(copy_id, "output2")
+
+
+@router.get("/final-copies/{copy_id}/employee-images/{kind}")
+def download_final_copy_employee_images_kind(copy_id: str, kind: str, user: dict = Depends(require_owner)) -> FileResponse:
+    if kind not in {"output1", "output2"}:
+        raise HTTPException(status_code=400, detail="Loại ảnh bảng công không hợp lệ")
+    return _download_final_copy_employee_images(copy_id, kind)
+
+
+def _download_final_copy_employee_images(copy_id: str, kind: str) -> FileResponse:
+    try:
+        source_path = resolve_drive_final_copy(copy_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    output_dir = STORAGE_DIR / "exports" / "history_employee_images"
+    safe_id = hashlib.sha256(copy_id.encode("utf-8")).hexdigest()[:20]
+    capture_source = source_path
+    if kind == "output1":
+        capture_source = STORAGE_DIR / "exports" / "final_copies" / f"{safe_id}_output1.xlsx"
+        try:
+            if not _is_fresh_export(capture_source, source_path):
+                export_final_copy_output1(source_path, capture_source)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Không tạo được Output 1 từ bản sao cuối cùng: {exc}") from exc
+    output_path = output_dir / f"final_{safe_id}_{kind}.zip"
+    try:
+        if not _is_fresh_export(output_path, capture_source):
+            export_employee_screenshots_from_workbook(capture_source, output_path, kind)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Không xuất được ảnh bảng công từ bản sao cuối cùng: {exc}") from exc
+    return FileResponse(
+        output_path,
+        media_type="application/zip",
+        filename=f"AnhBangCongNhanVien_{kind}_{source_path.stem}.zip",
+    )
+
+
+def _is_fresh_export(output_path: Path, source_path: Path) -> bool:
+    try:
+        return output_path.stat().st_size > 0 and output_path.stat().st_mtime_ns >= source_path.stat().st_mtime_ns
+    except FileNotFoundError:
+        return False
 
 
 def _find_session_source(session_id: str) -> Path:

@@ -10,6 +10,8 @@ CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
 PAYROLL_DATA_PATH = CONFIG_DIR / "payroll_data.json"
 PAYROLL_PROFILE_SOURCES_PATH = CONFIG_DIR / "payroll_profile_sources.json"
 STANDARD_WORK_DAYS = 26
+FACTORIES = {"factory1", "factory2"}
+PROFILE_FIELDS = {"name", "start_work_note", "note", "monthly_salary", "daily_salary", "hourly_salary", "bonus"}
 
 
 class PayrollEntry(BaseModel):
@@ -28,7 +30,12 @@ def normalize_employee_code(employee_code: object) -> str:
     return str(employee_code or "").strip()
 
 
-def load_payroll_data() -> dict[str, dict]:
+def normalize_factory(factory: object) -> str:
+    return "factory2" if str(factory or "").strip() == "factory2" else "factory1"
+
+
+def load_payroll_data(factory: str = "factory1") -> dict[str, dict]:
+    """Load profiles for one factory, treating legacy data as Factory 1."""
     if not PAYROLL_DATA_PATH.exists():
         return {}
 
@@ -38,44 +45,63 @@ def load_payroll_data() -> dict[str, dict]:
     if not isinstance(raw_data, dict):
         return {}
 
-    return raw_data
+    selected_factory = normalize_factory(factory)
+    if _is_factory_partitioned(raw_data):
+        bucket = raw_data.get(selected_factory, {})
+        return bucket if isinstance(bucket, dict) else {}
+    return raw_data if selected_factory == "factory1" else {}
 
 
-def save_payroll_data(data: dict[str, dict]) -> None:
+def save_payroll_data(data: dict[str, dict], factory: str = "factory1") -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    existing = _read_json_dict(PAYROLL_DATA_PATH)
+    partitioned = _partitioned_data(existing)
+    partitioned[normalize_factory(factory)] = data
     with PAYROLL_DATA_PATH.open("w", encoding="utf-8") as file:
-        json.dump(data, file, ensure_ascii=False, indent=2)
+        json.dump(partitioned, file, ensure_ascii=False, indent=2)
 
 
-def get_payroll_entry(employee_code: str) -> PayrollEntry:
-    raw_entry = load_payroll_data().get(normalize_employee_code(employee_code), {})
+def get_payroll_entry(employee_code: str, factory: str = "factory1") -> PayrollEntry:
+    raw_entry = load_payroll_data(factory).get(normalize_employee_code(employee_code), {})
     if not isinstance(raw_entry, dict):
         raw_entry = {}
     return PayrollEntry(**raw_entry)
 
 
-def save_payroll_entry(employee_code: str, entry: PayrollEntry) -> None:
+def save_payroll_entry(employee_code: str, entry: PayrollEntry, factory: str = "factory1") -> None:
     normalized_code = normalize_employee_code(employee_code)
     if not normalized_code:
         raise ValueError("Mã nhân viên không được để trống")
 
-    data = load_payroll_data()
-    data[normalized_code] = normalize_payroll_entry(entry).model_dump()
-    save_payroll_data(data)
+    normalized_entry = normalize_payroll_entry(entry)
+    data = load_payroll_data(factory)
+    data[normalized_code] = normalized_entry.model_dump()
+    save_payroll_data(data, factory)
+
+    # A save from the Nhân viên / Bảng lương screens is a deliberate local
+    # change. Remember its provenance so merely viewing or exporting Output 2
+    # cannot silently overwrite it from the newest final copy.
+    sources = _load_profile_sources(factory)
+    entry_sources = sources.get(normalized_code, {}) if isinstance(sources.get(normalized_code), dict) else {}
+    manual_source = _profile_source(None, None, "manual", "manual_entry")
+    for field in PROFILE_FIELDS:
+        entry_sources[field] = manual_source
+    sources[normalized_code] = entry_sources
+    _save_profile_sources(sources, factory)
 
 
-def list_payroll_employees() -> list[dict]:
+def list_payroll_employees(factory: str = "factory1") -> list[dict]:
     return [
         _entry_to_employee(code, PayrollEntry(**(entry if isinstance(entry, dict) else {})))
-        for code, entry in sorted(load_payroll_data().items(), key=lambda item: _employee_sort_key(item[0]))
+        for code, entry in sorted(load_payroll_data(factory).items(), key=lambda item: _employee_sort_key(item[0]))
     ]
 
 
-def merge_missing_payroll_entries(defaults_by_code: dict[str, dict]) -> None:
+def merge_missing_payroll_entries(defaults_by_code: dict[str, dict], factory: str = "factory1") -> None:
     if not defaults_by_code:
         return
 
-    data = load_payroll_data()
+    data = load_payroll_data(factory)
     changed = False
     for raw_code, defaults in defaults_by_code.items():
         code = normalize_employee_code(raw_code)
@@ -90,16 +116,18 @@ def merge_missing_payroll_entries(defaults_by_code: dict[str, dict]) -> None:
         changed = True
 
     if changed:
-        save_payroll_data(data)
+        save_payroll_data(data, factory)
 
 
 def merge_payroll_profile_updates(
     updates_by_code: dict[str, dict],
     *,
+    factory: str = "factory1",
     source_month: int | None = None,
     source_year: int | None = None,
     source_kind: str = "workbook",
     source_name: str = "",
+    overwrite_manual: bool = False,
 ) -> dict:
     if not updates_by_code:
         return {
@@ -111,13 +139,14 @@ def merge_payroll_profile_updates(
             "conflict_codes": [],
         }
 
-    data = load_payroll_data()
-    sources = _load_profile_sources()
+    data = load_payroll_data(factory)
+    sources = _load_profile_sources(factory)
     updated_codes: list[str] = []
     skipped_codes: list[str] = []
     conflict_codes: list[str] = []
     sources_changed = False
-    profile_fields = {"name", "start_work_note", "monthly_salary", "daily_salary", "hourly_salary"}
+    # These are persistent employee-profile fields. Monthly penalties and
+    # advances deliberately do not appear here: they must never carry over.
     incoming_source = _profile_source(source_month, source_year, source_kind, source_name)
 
     for raw_code, raw_updates in updates_by_code.items():
@@ -134,16 +163,30 @@ def merge_payroll_profile_updates(
         existing_sources = sources.get(code, {}) if isinstance(sources.get(code), dict) else {}
         changed = False
         blocked = False
-        for field in profile_fields:
+        for field in PROFILE_FIELDS:
             value = raw_updates.get(field)
             if value in (None, ""):
                 continue
-            if field in {"monthly_salary", "daily_salary", "hourly_salary"}:
+            if field in {"monthly_salary", "daily_salary", "hourly_salary", "bonus"}:
                 value = _number_or_none(value)
                 if value is None:
                     continue
             previous_source = existing_sources.get(field)
-            if _source_is_older(incoming_source, previous_source):
+            if (
+                source_kind == "final_copy"
+                and _source_kind(previous_source) == "manual"
+                and not overwrite_manual
+            ):
+                # Final copies remain available as the current source, but a
+                # manual profile change stays in effect until the user
+                # explicitly chooses to replace it during final-copy upload.
+                blocked = True
+                continue
+            # A deliberately uploaded final copy is authoritative even if old
+            # local/history data claims a newer period. This prevents stale
+            # machine data from resurrecting itself after the owner corrects
+            # the Excel final copy.
+            if source_kind != "final_copy" and _source_is_older(incoming_source, previous_source):
                 blocked = True
                 continue
             if next_entry.get(field) != value:
@@ -163,9 +206,9 @@ def merge_payroll_profile_updates(
                 conflict_codes.append(code)
 
     if updated_codes:
-        save_payroll_data(data)
+        save_payroll_data(data, factory)
     if sources_changed:
-        _save_profile_sources(sources)
+        _save_profile_sources(sources, factory)
 
     return {
         "updated_count": len(updated_codes),
@@ -177,21 +220,52 @@ def merge_payroll_profile_updates(
     }
 
 
-def _load_profile_sources() -> dict[str, dict[str, dict[str, Any]]]:
+def _load_profile_sources(factory: str = "factory1") -> dict[str, dict[str, dict[str, Any]]]:
     if not PAYROLL_PROFILE_SOURCES_PATH.exists():
         return {}
     try:
         with PAYROLL_PROFILE_SOURCES_PATH.open("r", encoding="utf-8") as file:
+            raw = json.load(file)
+        if not isinstance(raw, dict):
+            return {}
+        if _is_factory_partitioned(raw):
+            bucket = raw.get(normalize_factory(factory), {})
+            return bucket if isinstance(bucket, dict) else {}
+        return raw if normalize_factory(factory) == "factory1" else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_profile_sources(sources: dict[str, dict[str, dict[str, Any]]], factory: str = "factory1") -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    partitioned = _partitioned_data(_read_json_dict(PAYROLL_PROFILE_SOURCES_PATH))
+    partitioned[normalize_factory(factory)] = sources
+    with PAYROLL_PROFILE_SOURCES_PATH.open("w", encoding="utf-8") as file:
+        json.dump(partitioned, file, ensure_ascii=False, indent=2)
+
+
+def _read_json_dict(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as file:
             raw = json.load(file)
         return raw if isinstance(raw, dict) else {}
     except (OSError, ValueError):
         return {}
 
 
-def _save_profile_sources(sources: dict[str, dict[str, dict[str, Any]]]) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    with PAYROLL_PROFILE_SOURCES_PATH.open("w", encoding="utf-8") as file:
-        json.dump(sources, file, ensure_ascii=False, indent=2)
+def _is_factory_partitioned(data: dict[str, Any]) -> bool:
+    return any(key in FACTORIES for key in data)
+
+
+def _partitioned_data(data: dict[str, Any]) -> dict[str, dict]:
+    if _is_factory_partitioned(data):
+        return {
+            factory: value if isinstance(value, dict) else {}
+            for factory, value in (("factory1", data.get("factory1", {})), ("factory2", data.get("factory2", {})))
+        }
+    return {"factory1": data, "factory2": {}}
 
 
 def _profile_source(
@@ -225,11 +299,26 @@ def _source_is_older(incoming: dict[str, Any], previous: object) -> bool:
 
 def _source_kind_rank(kind: object) -> int:
     return {
+        "manual": 4,
         "final_copy": 3,
         "history_output2": 2,
         "analysis_copy": 1,
         "workbook": 0,
     }.get(str(kind or ""), 0)
+
+
+def count_manual_profile_changes(factory: str = "factory1") -> int:
+    """Return employee profiles currently protected by a manual save."""
+    sources = _load_profile_sources(factory)
+    return sum(
+        1
+        for field_sources in sources.values()
+        if isinstance(field_sources, dict) and any(_source_kind(source) == "manual" for source in field_sources.values())
+    )
+
+
+def _source_kind(source: object) -> str:
+    return str(source.get("kind") or "") if isinstance(source, dict) else ""
 
 
 def _period_key(source: dict[str, Any]) -> tuple[int, int] | None:

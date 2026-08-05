@@ -1,4 +1,5 @@
 from copy import copy
+from math import ceil
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -20,6 +21,7 @@ YELLOW = "FFFF00"
 GREEN = "C4D79B"
 WHITE = "FFFFFF"
 NOTE_FILL = "FFF4CC"
+START_WORK_FILL = "DDEBF7"
 RED = "C00000"
 FONT_NAME = "Arial"
 
@@ -28,16 +30,17 @@ def preview_payroll(
     source_path: Path,
     review_overrides: list[dict] | None = None,
     profile_codes: set[str] | None = None,
+    factory: str = "factory1",
 ) -> dict:
     with NamedTemporaryFile(suffix=".xlsx", delete=False) as temp_file:
         temp_path = Path(temp_file.name)
 
     try:
-        export_processed_workbook(source_path, temp_path, review_overrides=review_overrides)
+        export_processed_workbook(source_path, temp_path, review_overrides=review_overrides, factory=factory)
         wb = load_workbook(temp_path, data_only=False)
         ws = _select_attendance_sheet(wb)
         blocks = detect_employee_blocks(ws)
-        employees = [_build_employee_preview(ws, block, profile_codes=profile_codes) for block in blocks]
+        employees = [_build_employee_preview(ws, block, profile_codes=profile_codes, factory=factory) for block in blocks]
         return {"sheet_name": ws.title, "employees": employees}
     finally:
         temp_path.unlink(missing_ok=True)
@@ -49,12 +52,13 @@ def export_payroll_workbook(
     review_overrides: list[dict] | None = None,
     include_saved_data: bool = True,
     profile_codes: set[str] | None = None,
+    factory: str = "factory1",
 ) -> Path:
     with NamedTemporaryFile(suffix=".xlsx", delete=False) as temp_file:
         temp_output1 = Path(temp_file.name)
 
     try:
-        export_processed_workbook(source_path, temp_output1, review_overrides=review_overrides)
+        export_processed_workbook(source_path, temp_output1, review_overrides=review_overrides, factory=factory)
         wb = load_workbook(temp_output1, data_only=False)
         ws = _select_attendance_sheet(wb)
         blocks = detect_employee_blocks(ws)
@@ -66,6 +70,7 @@ def export_payroll_workbook(
                 block,
                 include_saved_data=include_saved_data,
                 profile_codes=profile_codes,
+                factory=factory,
             )
             _write_payroll_block(ws, block, preview)
 
@@ -79,7 +84,12 @@ def export_payroll_workbook(
         temp_output1.unlink(missing_ok=True)
 
 
-def apply_payroll_to_workbook(source_path: Path, output_path: Path) -> Path:
+def apply_payroll_to_workbook(
+    source_path: Path,
+    output_path: Path,
+    profile_codes: set[str] | None = None,
+    factory: str = "factory1",
+) -> Path:
     keep_vba = source_path.suffix.lower() == ".xlsm"
     wb = load_workbook(source_path, data_only=False, keep_vba=keep_vba)
     ws = _select_attendance_sheet(wb)
@@ -89,7 +99,7 @@ def apply_payroll_to_workbook(source_path: Path, output_path: Path) -> Path:
 
     for block in blocks:
         _format_attendance_time_row(ws, block)
-        preview = _build_employee_preview(ws, block)
+        preview = _build_employee_preview(ws, block, profile_codes=profile_codes, factory=factory)
         _write_payroll_block(ws, block, preview)
 
     _write_monthly_grand_total(ws, blocks)
@@ -148,8 +158,9 @@ def _build_employee_preview(
     block,
     include_saved_data: bool = True,
     profile_codes: set[str] | None = None,
+    factory: str = "factory1",
 ) -> dict:
-    entry = get_payroll_entry(block.employee_code)
+    entry = get_payroll_entry(block.employee_code, factory)
     if profile_codes is not None and block.employee_code not in profile_codes:
         entry = PayrollEntry()
     total_hours = _sum_work_hours(ws, block.result_row)
@@ -164,6 +175,7 @@ def _build_employee_preview(
     return {
         "employee_code": block.employee_code,
         "name": entry.name if include_saved_data else "",
+        "bank_account": _saved_bank_account(factory, block.employee_code) if include_saved_data else "",
         "start_work_note": entry.start_work_note if include_saved_data else "",
         "note": entry.note if include_saved_data else "",
         "header_row": block.header_row,
@@ -301,7 +313,7 @@ def _write_payroll_block(ws, block, preview: dict) -> None:
             name=FONT_NAME,
             bold=col in {total_col, penalty_rate_col, code_col, name_col, final_salary_col},
             size=10 if col in {name_col, final_salary_col} else 9,
-            color=RED if col in {total_col, penalty_rate_col, code_col, salary_col} else "000000",
+            color=RED if col in {total_col, penalty_rate_col, code_col} else "000000",
         )
         if col in {
             salary_col,
@@ -316,25 +328,49 @@ def _write_payroll_block(ws, block, preview: dict) -> None:
         elif col in {total_col, penalty_rate_col, work_days_col, overtime_col}:
             cell.number_format = FLEXIBLE_NUMBER_FORMAT
 
+    bank_account_cell = ws.cell(row=result_row - 1, column=name_col)
+    bank_account_cell.value = str(preview.get("bank_account") or "")
+    bank_account_cell.number_format = "@"
+    bank_account_cell.alignment = Alignment(horizontal="left", vertical="center")
+
+    # The legacy layout reserves AI for Bắt đầu làm and AJ:AR for a separate
+    # comment. Do not merge them: a long comment must never hide the start
+    # work information.
+    for col in range(total_col, name_col):
+        ws.cell(row=note_row, column=col).value = None
     for col in range(name_col, final_salary_col + 1):
         note_part = ws.cell(row=note_row, column=col)
         note_part.value = None
         note_part.fill = PatternFill("solid", fgColor=NOTE_FILL)
-    _safe_merge(ws, note_row, name_col, note_row, final_salary_col)
-    note_cell = ws.cell(row=note_row, column=name_col)
-    note_cell.value = _combined_payroll_note(preview)
+    start_work_cell = ws.cell(row=note_row, column=name_col)
+    start_work_cell.value = _format_start_work_note(preview.get("start_work_note"))
+    start_work_cell.fill = PatternFill("solid", fgColor=START_WORK_FILL)
+    start_work_cell.font = Font(name=FONT_NAME, size=9, bold=True, color="000000")
+    start_work_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    _safe_merge(ws, note_row, name_col + 1, note_row, final_salary_col)
+    note_cell = ws.cell(row=note_row, column=name_col + 1)
+    note_cell.value = str(preview.get("note") or "").strip()
     note_cell.fill = PatternFill("solid", fgColor=NOTE_FILL)
-    note_cell.font = Font(name=FONT_NAME, size=9, color="000000")
+    note_cell.font = Font(name=FONT_NAME, size=9, color=RED)
     note_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-    ws.row_dimensions[note_row].height = max(float(ws.row_dimensions[note_row].height or 0), 20)
+    _set_note_row_height(ws, note_row, start_work_cell.value, note_cell.value, name_col, final_salary_col)
 
 
-def _combined_payroll_note(preview: dict) -> str:
-    parts = [
-        _format_start_work_note(preview.get("start_work_note")),
-        str(preview.get("note") or "").strip(),
-    ]
-    return " | ".join(part for index, part in enumerate(parts) if part and part not in parts[:index])
+def _set_note_row_height(ws, row: int, start_value: object, note_value: object, start_col: int, end_col: int) -> None:
+    """Excel does not auto-fit merged cells, so estimate both note areas."""
+    start_width = float(ws.column_dimensions[get_column_letter(start_col)].width or 10)
+    note_width = sum(
+        float(ws.column_dimensions[get_column_letter(col)].width or 10)
+        for col in range(start_col + 1, end_col + 1)
+    )
+    line_count = max(_wrapped_line_count(start_value, start_width), _wrapped_line_count(note_value, note_width))
+    required_height = max(20, 15 * line_count + 5)
+    ws.row_dimensions[row].height = max(float(ws.row_dimensions[row].height or 0), required_height)
+
+
+def _wrapped_line_count(value: object, width: float) -> int:
+    chars_per_line = max(12, int(width * 0.72))
+    return max((ceil(len(line) / chars_per_line) or 1 for line in (str(value or "").splitlines() or [""])), default=1)
 
 
 def _sum_work_hours(ws, row: int) -> float:
@@ -383,6 +419,13 @@ def _format_start_work_note(value: object) -> str:
     if normalized.startswith("bắt đầu") or normalized.startswith("bat dau"):
         return text
     return f"Bắt đầu làm {text}"
+
+
+def _saved_bank_account(factory: str, employee_code: object) -> str:
+    # Import lazily because the bank module also owns optional Drive helpers.
+    from app.services.bank_account_store import get_saved_account_number
+
+    return get_saved_account_number(factory, employee_code)
 
 
 def _month_label(value: object) -> str:

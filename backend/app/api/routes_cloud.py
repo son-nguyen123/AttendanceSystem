@@ -161,6 +161,7 @@ async def save_final_excel_copy(
     year: int = Form(...),
     factory: str = Form("factory1"),
     smart_scan: bool = Form(True),
+    profile_sync_mode: str = Form("replace_manual"),
     user: dict = Depends(require_owner),
 ) -> dict[str, Any]:
     suffix = Path(file.filename or "").suffix.lower()
@@ -178,7 +179,16 @@ async def save_final_excel_copy(
         if smart_scan:
             profile = inspect_workbook_for_role(uploaded_path, "final_copy", factory=factory)
             ensure_period_matches(profile, month, year, "Bản sao cuối cùng")
-        return run_final_excel_copy(uploaded_path, file.filename or f"ban_sao_cuoi_cung{suffix}", month, year, factory=factory)
+        if profile_sync_mode not in {"replace_manual", "keep_manual"}:
+            raise HTTPException(status_code=400, detail="Lựa chọn đồng bộ hồ sơ không hợp lệ")
+        return run_final_excel_copy(
+            uploaded_path,
+            file.filename or f"ban_sao_cuoi_cung{suffix}",
+            month,
+            year,
+            factory=factory,
+            profile_sync_mode=profile_sync_mode,
+        )
     except Exception as exc:
         shutil.rmtree(session_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=f"Không lưu được bản sao cuối cùng: {exc}") from exc

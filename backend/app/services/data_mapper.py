@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from math import ceil
 import re
 import unicodedata
 from contextlib import ExitStack
@@ -25,6 +26,7 @@ MONEY_FORMAT = "#,##0"
 FLEXIBLE_NUMBER_FORMAT = "General"
 WHITE = "FFFFFF"
 NOTE_FILL = "FFF4CC"
+START_WORK_FILL = "DDEBF7"
 YELLOW = "FFFF00"
 GREEN = "C4D79B"
 RED = "C00000"
@@ -63,6 +65,8 @@ class SummaryBlock:
 class OwnerRecord:
     code: str
     name: str | None = None
+    bank_account: str | None = None
+    start_work_note: str | None = None
     salary: Any = None
     bonus: Any = None
     note: str | None = None
@@ -79,6 +83,7 @@ def map_owner_data_to_current_workbook(
     output_path: Path,
     mode: MappingMode = "output2",
     smart_mapping: bool = True,
+    factory: str = "factory1",
 ) -> dict[str, Any]:
     with TemporaryDirectory(prefix="attendance-owner-map-") as temp_dir, ExitStack() as stack:
         prepared_previous_path, ignored_trailing_style_rows = _prepare_mapping_source_workbook(
@@ -154,6 +159,13 @@ def map_owner_data_to_current_workbook(
 
         if mode == "output2":
             _write_monthly_grand_total(current_ws, list(current_blocks.values()))
+
+        # Bank accounts are deliberately managed by the Bank screen/Word
+        # import. Never carry an account number from the owner mapping file;
+        # Output 2 receives only the factory-specific bank registry below.
+        _clear_mapped_bank_account_cells(current_ws, list(current_blocks.values()))
+        if mode == "output2":
+            _apply_saved_bank_accounts(current_ws, list(current_blocks.values()), factory)
 
         _enable_formula_recalculation(current_wb)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -321,7 +333,15 @@ def _owner_records_by_code(source_ws, source_values_ws=None) -> dict[str, OwnerR
                 result_row,
                 fields.get("bonus"),
             )
-            note = _semantic_note_value(
+            bank_account = _semantic_bank_account_value(
+                source_ws,
+                values_ws,
+                header_row,
+                result_row,
+                code_col,
+                fields,
+            )
+            start_work_note, note = _semantic_start_work_and_note(
                 source_ws,
                 values_ws,
                 result_row,
@@ -341,6 +361,8 @@ def _owner_records_by_code(source_ws, source_values_ws=None) -> dict[str, OwnerR
             records[code] = OwnerRecord(
                 code=code,
                 name=name,
+                bank_account=bank_account,
+                start_work_note=start_work_note,
                 salary=salary,
                 bonus=bonus,
                 note=note,
@@ -447,7 +469,38 @@ def _semantic_amount_present(source_ws, values_ws, row: int, col: int | None) ->
     return raw.data_type == "f" and values_ws.cell(row, col).value is None
 
 
-def _semantic_note_value(
+def _semantic_bank_account_value(
+    source_ws,
+    values_ws,
+    header_row: int,
+    result_row: int,
+    code_col: int,
+    fields: dict[str, int],
+) -> str | None:
+    """Read the account number kept one row above the employee name in legacy files."""
+    name_col = fields.get("name") or code_col + 1
+    for row in range(header_row + 1, result_row):
+        value = _bank_account_text(values_ws.cell(row, name_col).value)
+        if value:
+            return value
+    return None
+
+
+def _bank_account_text(value: object) -> str | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        text = str(value)
+    elif isinstance(value, float):
+        if not value.is_integer():
+            return None
+        text = str(int(value))
+    else:
+        text = re.sub(r"\s+", "", str(value))
+    return text if re.fullmatch(r"\d{8,20}", text) else None
+
+
+def _semantic_start_work_and_note(
     source_ws,
     values_ws,
     result_row: int,
@@ -455,12 +508,25 @@ def _semantic_note_value(
     code_col: int,
     fields: dict[str, int],
 ) -> str | None:
-    note_col = fields.get("note")
-    if note_col is not None:
-        for row in range(result_row, section_end_row + 1):
-            value = _plain_text_value(values_ws.cell(row, note_col).value)
-            if value:
-                return value
+    name_col = fields.get("name") or code_col + 1
+    note_row = result_row + 1
+    start_work_note = _plain_text_value(values_ws.cell(note_row, name_col).value) if note_row <= section_end_row else None
+    note_parts: list[str] = []
+    if start_work_note and " | " in start_work_note:
+        start_work_note, inline_note = start_work_note.split(" | ", maxsplit=1)
+        if inline_note.strip():
+            note_parts.append(inline_note.strip())
+
+    # Legacy files put the comment in any column to the right of the start
+    # work field (AJ, AM, ...). Preserve it separately from Bắt đầu làm.
+    if note_row <= section_end_row:
+        for col in range(name_col + 1, source_ws.max_column + 1):
+            value = _plain_text_value(values_ws.cell(note_row, col).value)
+            if value and value not in note_parts:
+                note_parts.append(value)
+
+    if start_work_note or note_parts:
+        return start_work_note, " | ".join(note_parts) or None
 
     start_col = code_col + 1
     end_col = max(fields.values(), default=min(source_ws.max_column, code_col + 12))
@@ -470,8 +536,8 @@ def _semantic_note_value(
             if not value or len(value) < 3:
                 continue
             if _semantic_field_name(_normalize_label(value)) is None:
-                return value
-    return None
+                return None, value
+    return None, None
 
 
 def _plain_text_value(value: object) -> str | None:
@@ -573,12 +639,14 @@ def _write_reformed_owner_area(
         max(target.code_col + 1, target.data_end_col),
     )
     source_name = None
+    source_start_work_note = None
     source_salary = None
     source_bonus = None
     source_note = None
     needs_deduction_review = False
     if isinstance(source, OwnerRecord):
         source_name = source.name
+        source_start_work_note = source.start_work_note
         source_salary = source.salary
         source_bonus = source.bonus
         source_note = source.note
@@ -703,29 +771,37 @@ def _write_reformed_owner_area(
         f"+IF(ISNUMBER({bonus_letter}{result_row}),{bonus_letter}{result_row},0)"
     )
 
+    bank_row = result_row - 1
+    # Bank accounts are managed by the Bank screen/Word import. A mapped
+    # workbook is never authoritative for this field.
+    target_ws.cell(bank_row, name_col).value = None
+    target_ws.cell(bank_row, name_col).number_format = "@"
+    target_ws.cell(bank_row, name_col).alignment = Alignment(horizontal="left", vertical="center")
     for col in range(name_col, final_salary_col + 1):
         note_part = target_ws.cell(note_row, col)
         note_part.value = None
         note_part.fill = PatternFill("solid", fgColor=NOTE_FILL)
     target_ws.merge_cells(
         start_row=note_row,
-        start_column=name_col,
+        start_column=name_col + 1,
         end_row=note_row,
         end_column=final_salary_col,
     )
-    note_cell = target_ws.cell(note_row, name_col)
+    start_work_cell = target_ws.cell(note_row, name_col)
+    start_work_cell.value = source_start_work_note
+    start_work_cell.fill = PatternFill("solid", fgColor=START_WORK_FILL)
+    start_work_cell.font = Font(name=FONT_NAME, size=9, bold=True, color=BLACK)
+    start_work_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    note_cell = target_ws.cell(note_row, name_col + 1)
     note_cell.value = source_note
     note_cell.fill = PatternFill("solid", fgColor=NOTE_FILL)
-    note_cell.font = Font(name=FONT_NAME, size=9, color=BLACK)
+    note_cell.font = Font(name=FONT_NAME, size=9, color=RED)
     note_cell.alignment = Alignment(
         horizontal="left",
         vertical="center",
         wrap_text=True,
     )
-    target_ws.row_dimensions[note_row].height = max(
-        float(target_ws.row_dimensions[note_row].height or 0),
-        20,
-    )
+    _set_note_row_height(target_ws, note_row, source_start_work_note, source_note, name_col, final_salary_col)
 
     for col in {
         salary_col,
@@ -741,6 +817,44 @@ def _write_reformed_owner_area(
         target_ws.cell(result_row, col).number_format = FLEXIBLE_NUMBER_FORMAT
 
     return needs_deduction_review
+
+
+def _clear_mapped_bank_account_cells(ws, blocks: list[SummaryBlock]) -> None:
+    for block in blocks:
+        cell = ws.cell(block.result_row - 1, block.code_col + 1)
+        cell.value = None
+        cell.number_format = "@"
+        cell.alignment = Alignment(horizontal="left", vertical="center")
+
+
+def _apply_saved_bank_accounts(ws, blocks: list[SummaryBlock], factory: str) -> None:
+    from app.services.bank_account_store import get_saved_account_number
+
+    for block in blocks:
+        cell = ws.cell(block.result_row - 1, block.code_col + 1)
+        cell.value = get_saved_account_number(factory, block.code)
+        cell.number_format = "@"
+        cell.alignment = Alignment(horizontal="left", vertical="center")
+
+
+def _set_note_row_height(ws, row: int, start_value: object, note_value: object, start_col: int, end_col: int) -> None:
+    """Estimate the height needed for separate start-work and comment cells."""
+    start_width = float(ws.column_dimensions[get_column_letter(start_col)].width or 10)
+    note_width = sum(
+        float(ws.column_dimensions[get_column_letter(col)].width or 10)
+        for col in range(start_col + 1, end_col + 1)
+    )
+    line_count = max(
+        _wrapped_line_count(start_value, start_width),
+        _wrapped_line_count(note_value, note_width),
+    )
+    required_height = max(20, 15 * line_count + 5)
+    ws.row_dimensions[row].height = max(float(ws.row_dimensions[row].height or 0), required_height)
+
+
+def _wrapped_line_count(value: object, width: float) -> int:
+    chars_per_line = max(12, int(width * 0.72))
+    return max((ceil(len(line) / chars_per_line) or 1 for line in (str(value or "").splitlines() or [""])), default=1)
 
 
 def _write_monthly_grand_total(ws, blocks: list[SummaryBlock]) -> None:
@@ -836,7 +950,7 @@ def _format_reformed_owner_area(
             name=FONT_NAME,
             size=10,
             bold=col in {total_col, total_col + 1, total_col + 2, total_col + 3, final_salary_col},
-            color=RED if col in {total_col, total_col + 1, total_col + 2, total_col + 4} else BLACK,
+            color=RED if col in {total_col, total_col + 1, total_col + 2} else BLACK,
         )
 
     widths = {

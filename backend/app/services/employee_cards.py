@@ -1,15 +1,28 @@
 import calendar
 import html
+import json
+import os
 import re
+import subprocess
 import zipfile
 from datetime import date
 from io import BytesIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 from PIL import Image, ImageDraw, ImageFont
 
-from app.services.payroll_workbook import preview_payroll
-from app.services.workbook_processor import analyze_workbook
+from app.services.block_detector import detect_employee_blocks
+from app.services.owner_profile_sync import sync_latest_final_copy_profile
+from app.services.payroll_workbook import export_payroll_workbook, preview_payroll
+from app.services.period_detector import detect_period_from_sheet
+from app.services.workbook_processor import analyze_workbook, export_processed_workbook
+
+
+ROOT_DIR = Path(__file__).resolve().parents[3]
+EXCEL_RANGE_EXPORT_SCRIPT = ROOT_DIR / "scripts" / "export-excel-ranges.ps1"
 
 
 def export_employee_cards_zip(
@@ -17,28 +30,148 @@ def export_employee_cards_zip(
     output_path: Path,
     kind: str,
     review_overrides: list[dict] | None = None,
+    factory: str = "factory1",
 ) -> Path:
     if kind not in {"output1", "output2"}:
         raise ValueError("Loại phiếu không hợp lệ")
 
     overrides = review_overrides or []
-    analysis = analyze_workbook(source_path)
-    _apply_review_overrides_to_analysis(analysis, overrides)
-    payroll = preview_payroll(source_path, review_overrides=overrides)
-    payroll_by_code = {item["employee_code"]: item for item in payroll.get("employees", [])}
+    profile_sync = sync_latest_final_copy_profile(source_path, factory)
+    profile_codes = {
+        str(code).strip()
+        for code in profile_sync.get("profile_codes", [])
+        if str(code).strip()
+    } if profile_sync.get("status") == "ok" else set()
+    with TemporaryDirectory(prefix="attendance-excel-screenshots-") as temporary_dir:
+        workbook_path = Path(temporary_dir) / f"employee_cards_{kind}.xlsx"
+        if kind == "output2":
+            export_payroll_workbook(
+                source_path,
+                workbook_path,
+                review_overrides=overrides,
+                include_saved_data=True,
+                profile_codes=profile_codes,
+                factory=factory,
+            )
+        else:
+            export_processed_workbook(
+                source_path,
+                workbook_path,
+                review_overrides=overrides,
+                factory=factory,
+            )
+        return export_employee_screenshots_from_workbook(workbook_path, output_path, kind)
 
-    period = analysis.get("period", {})
-    period_label = _period_label(period)
+
+def export_employee_screenshots_from_workbook(
+    workbook_path: Path,
+    output_path: Path,
+    kind: str,
+) -> Path:
+    """Capture each employee block exactly as Excel renders it and zip the PNGs."""
+    if kind not in {"output1", "output2"}:
+        raise ValueError("Loại ảnh bảng công không hợp lệ")
+    if not EXCEL_RANGE_EXPORT_SCRIPT.exists():
+        raise FileNotFoundError("Thiếu công cụ chụp vùng Excel")
+
+    keep_vba = workbook_path.suffix.lower() == ".xlsm"
+    workbook = load_workbook(workbook_path, data_only=False, keep_vba=keep_vba)
+    try:
+        worksheet, blocks = _employee_screenshot_sheet_and_blocks(workbook)
+        if not blocks:
+            raise ValueError("Không tìm thấy khung bảng công nhân viên trong file Excel")
+        period = detect_period_from_sheet(worksheet)
+        period_label = _period_label(period)
+        final_column = 44 if kind == "output2" else 36
+        name_column = 35 if kind == "output2" else 34
+        jobs: list[dict[str, str]] = []
+        used_filenames: set[str] = set()
+        for index, block in enumerate(blocks, start=1):
+            employee_code = str(block.employee_code)
+            name = str(worksheet.cell(block.result_row, name_column).value or "").strip()
+            filename = _unique_card_filename(
+                _card_filename(employee_code, {"name": name}, kind, period_label),
+                used_filenames,
+                index,
+            )
+            jobs.append(
+                {
+                    "sheet": worksheet.title,
+                    "range": f"A{block.header_row}:{get_column_letter(final_column)}{block.header_row + 7}",
+                    "filename": filename,
+                }
+            )
+    finally:
+        workbook.close()
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for block in analysis.get("blocks", []):
-            employee_code = str(block["employee_code"])
-            payroll = payroll_by_code.get(employee_code)
-            image_bytes = _render_employee_card_png(block, payroll, kind, period)
-            filename = _card_filename(employee_code, payroll, kind, period_label)
-            archive.writestr(filename, image_bytes)
-
+    with TemporaryDirectory(prefix="attendance-excel-png-") as image_dir:
+        image_path = Path(image_dir)
+        jobs_path = image_path / "jobs.json"
+        jobs_path.write_text(json.dumps(jobs, ensure_ascii=False, indent=2), encoding="utf-8")
+        _run_excel_range_export(workbook_path, jobs_path, image_path, len(jobs))
+        with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for job in jobs:
+                png_path = image_path / job["filename"]
+                if not png_path.exists() or png_path.stat().st_size <= 0:
+                    raise ValueError(f"Excel chưa tạo được ảnh {job['filename']}")
+                archive.write(png_path, arcname=job["filename"])
     return output_path
+
+
+def _employee_screenshot_sheet_and_blocks(workbook):
+    best_sheet = None
+    best_blocks = []
+    for worksheet in workbook.worksheets:
+        blocks = detect_employee_blocks(worksheet)
+        if len(blocks) > len(best_blocks):
+            best_sheet = worksheet
+            best_blocks = blocks
+    if best_sheet is None:
+        best_sheet = workbook.active
+    return best_sheet, best_blocks
+
+
+def _run_excel_range_export(workbook_path: Path, jobs_path: Path, output_dir: Path, job_count: int) -> None:
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(EXCEL_RANGE_EXPORT_SCRIPT),
+        "-WorkbookPath",
+        str(workbook_path.resolve()),
+        "-JobsPath",
+        str(jobs_path.resolve()),
+        "-OutputDir",
+        str(output_dir.resolve()),
+    ]
+    creation_flags = 0x08000000 if os.name == "nt" else 0
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=max(90, job_count * 8),
+            creationflags=creation_flags,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Excel chụp ảnh quá thời gian; hãy đóng các hộp thoại Excel đang mở và thử lại") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        raise RuntimeError(f"Không chụp được vùng Excel: {detail or 'Excel không phản hồi'}") from exc
+
+
+def _unique_card_filename(filename: str, used: set[str], index: int) -> str:
+    if filename not in used:
+        used.add(filename)
+        return filename
+    path = Path(filename)
+    unique = f"{path.stem}_{index}{path.suffix}"
+    used.add(unique)
+    return unique
 
 
 def _render_employee_card_png(block: dict, payroll: dict | None, kind: str, period: dict) -> bytes:
