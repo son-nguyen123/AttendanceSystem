@@ -12,7 +12,9 @@ from pydantic import BaseModel, Field
 
 from app.api.auth_dependencies import ROLE_LOGIN_ENABLED, LOCAL_OWNER_USER, require_staff_or_owner
 from app.services.cloud_sync import submit_attendance_to_owner
-from app.services.data_mapper import map_owner_data_to_current_workbook
+from app.services.data_mapper import inspect_bank_accounts_for_mapping, map_owner_data_to_current_workbook
+from app.services.bank_payroll import backup_registry_to_drive
+from app.services.bank_payroll import save_accounts
 from app.services.auth_service import AuthError, get_user_by_token
 from app.services.employee_cards import export_employee_cards_zip
 from app.services.factory2_workbook import analyze_factory2_workbook, export_factory2_output1, write_factory2_standard_source
@@ -373,6 +375,8 @@ async def map_owner_data(
     factory: Literal["factory1", "factory2"] = Form("factory1"),
     smart_scan: bool = Form(True),
     smart_mapping: bool = Form(True),
+    bank_updates: str = Form("[]"),
+    allow_missing_bank_accounts: bool = Form(False),
     user: dict = Depends(require_staff_or_owner),
 ) -> FileResponse:
     current_suffix = Path(current_file.filename or "").suffix.lower()
@@ -394,6 +398,59 @@ async def map_owner_data(
     try:
         if smart_scan:
             validate_mapping_pair(current_path, previous_path, factory=factory)
+        try:
+            requested_bank_updates = json.loads(bank_updates or "[]")
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Dữ liệu cập nhật tài khoản không hợp lệ") from exc
+        if not isinstance(requested_bank_updates, list):
+            raise HTTPException(status_code=400, detail="Dữ liệu cập nhật tài khoản phải là danh sách")
+
+        bank_preflight = inspect_bank_accounts_for_mapping(
+            current_path,
+            previous_path,
+            factory=factory,
+            smart_mapping=smart_mapping,
+        )
+        current_codes = {
+            item["employee_code"]
+            for item in bank_preflight.get("missing_bank_accounts", []) + bank_preflight.get("changed_bank_accounts", [])
+        }
+        bank_rows = []
+        for item in requested_bank_updates:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("employee_code") or "").strip()
+            account = str(item.get("account_number") or "").strip()
+            if code not in current_codes or not account:
+                continue
+            bank_rows.append({
+                "employee_code": code,
+                "account_number": account,
+                "name": str(item.get("name") or "").strip(),
+            })
+        updated_codes = {row["employee_code"] for row in bank_rows}
+        unresolved_missing = [
+            item["employee_code"]
+            for item in bank_preflight.get("missing_bank_accounts", [])
+            if item["employee_code"] not in updated_codes
+        ]
+        if unresolved_missing and not allow_missing_bank_accounts:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Còn mã thiếu số tài khoản ngân hàng",
+                    "missing_codes": unresolved_missing,
+                },
+            )
+        bank_saved = 0
+        bank_backup_status = "not_requested"
+        if bank_rows:
+            bank_saved = int(save_accounts(factory, bank_rows).get("updated") or 0)
+            try:
+                backup_registry_to_drive(factory)
+                bank_backup_status = "saved_to_drive"
+            except Exception:
+                bank_backup_status = "local_only"
         summary = map_owner_data_to_current_workbook(
             current_path,
             previous_path,
@@ -402,6 +459,13 @@ async def map_owner_data(
             smart_mapping=smart_mapping,
             factory=factory,
         )
+        summary.update({
+            "bank_missing_count": bank_preflight.get("missing_count", 0),
+            "bank_changed_count": bank_preflight.get("changed_count", 0),
+            "bank_accounts_saved": bank_saved,
+            "bank_backup_status": bank_backup_status,
+            "allow_missing_bank_accounts": allow_missing_bank_accounts,
+        })
         map_owner_data_to_current_workbook(
             current_path,
             previous_path,
@@ -410,6 +474,9 @@ async def map_owner_data(
             smart_mapping=smart_mapping,
             factory=factory,
         )
+    except HTTPException:
+        shutil.rmtree(session_dir, ignore_errors=True)
+        raise
     except Exception as exc:
         shutil.rmtree(session_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=f"Không gán được dữ liệu: {exc}") from exc
@@ -424,6 +491,47 @@ async def map_owner_data(
         filename="Output1_Output2.zip",
         headers={"X-Mapping-Summary": json.dumps(summary, ensure_ascii=False)},
     )
+
+
+@router.post("/attendance/map-owner-data/inspect")
+async def inspect_map_owner_data(
+    current_file: UploadFile = File(...),
+    previous_file: UploadFile = File(...),
+    factory: Literal["factory1", "factory2"] = Form("factory1"),
+    smart_scan: bool = Form(True),
+    smart_mapping: bool = Form(True),
+    user: dict = Depends(require_staff_or_owner),
+) -> dict:
+    """Preview mapping and bank-account gaps before generating Output files."""
+    current_suffix = Path(current_file.filename or "").suffix.lower()
+    previous_suffix = Path(previous_file.filename or "").suffix.lower()
+    if current_suffix not in {".xlsx", ".xlsm"} or previous_suffix not in {".xlsx", ".xlsm"}:
+        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xlsx hoặc .xlsm")
+
+    session_id = uuid4().hex
+    session_dir = STORAGE_DIR / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    current_path = session_dir / f"current{current_suffix}"
+    previous_path = session_dir / f"previous{previous_suffix}"
+    current_path.write_bytes(await current_file.read())
+    previous_path.write_bytes(await previous_file.read())
+    try:
+        if smart_scan:
+            validate_mapping_pair(current_path, previous_path, factory=factory)
+        result = inspect_bank_accounts_for_mapping(
+            current_path,
+            previous_path,
+            factory=factory,
+            smart_mapping=smart_mapping,
+        )
+        result["smart_mapping"] = smart_mapping
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Không kiểm tra được dữ liệu gán: {exc}") from exc
+    finally:
+        shutil.rmtree(session_dir, ignore_errors=True)
 
 
 @router.post("/attendance/export")

@@ -5,6 +5,80 @@
   background: #f7f8fb;
 }
 
+.mapping-bank-dialog {
+  width: min(900px, calc(100vw - 32px));
+  max-height: min(88vh, 860px);
+  overflow-y: auto;
+  text-align: left;
+}
+
+.mapping-bank-section {
+  margin-top: 18px;
+}
+
+.mapping-bank-section h3 {
+  margin: 0 0 8px;
+  color: #20324a;
+  font-size: 15px;
+}
+
+.mapping-bank-list {
+  display: grid;
+  gap: 8px;
+  max-height: 250px;
+  overflow-y: auto;
+  padding: 8px;
+  border: 1px solid #dbe5f2;
+  border-radius: 12px;
+  background: #f8fbff;
+}
+
+.mapping-bank-row {
+  display: grid;
+  grid-template-columns: minmax(135px, 1fr) minmax(220px, 1.2fr) minmax(150px, 1fr);
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid #e6edf6;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.mapping-bank-row > div:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mapping-bank-row > div:first-child span,
+.mapping-bank-muted {
+  color: #718096;
+  font-size: 12px;
+}
+
+.mapping-bank-row select,
+.mapping-bank-input {
+  min-width: 0;
+  width: 100%;
+}
+
+.mapping-bank-allow-missing {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-top: 16px;
+  padding: 10px 12px;
+  border: 1px solid #f0d39b;
+  border-radius: 10px;
+  background: #fff9ed;
+  color: #694d13;
+  font-size: 13px;
+}
+
+.mapping-bank-actions {
+  margin-top: 18px;
+}
+
 .topbar {
   display: flex;
   align-items: flex-start;

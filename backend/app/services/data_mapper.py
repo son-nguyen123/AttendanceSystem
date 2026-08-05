@@ -77,6 +77,69 @@ class OwnerRecord:
 MappingMode = Literal["output1", "output2"]
 
 
+def inspect_bank_accounts_for_mapping(
+    current_path: Path,
+    previous_path: Path,
+    *,
+    factory: str = "factory1",
+    smart_mapping: bool = True,
+) -> dict[str, Any]:
+    """Compare the mapping target with the saved bank registry.
+
+    The previous workbook is only a candidate source.  The bank registry is
+    the authoritative source used when Output 2 is generated, so this helper
+    deliberately reports differences instead of silently copying an account
+    from the old workbook.
+    """
+    from app.services.bank_account_store import get_saved_account_number, normalize_account_number
+
+    current_wb = load_workbook(current_path, data_only=False)
+    previous_wb = load_workbook(previous_path, data_only=False)
+    previous_values_wb = load_workbook(previous_path, data_only=True)
+    try:
+        current_ws = current_wb.active
+        previous_ws = previous_wb.active
+        previous_values_ws = previous_values_wb[previous_ws.title]
+        current_blocks = _summary_blocks_by_code(current_ws)
+        if not current_blocks:
+            raise ValueError("File tháng mới chưa có vùng Tổng giờ công / Mã / Tên nhân viên để kiểm tra")
+
+        previous_records = _owner_records_by_code(previous_ws, previous_values_ws) if smart_mapping else {}
+        current_codes = sorted(current_blocks, key=_code_sort_key)
+        missing: list[dict[str, str]] = []
+        changed: list[dict[str, str]] = []
+        for code in current_codes:
+            saved = normalize_account_number(get_saved_account_number(factory, code))
+            candidate = normalize_account_number(
+                (previous_records.get(code).bank_account if previous_records.get(code) else "")
+            )
+            source_name = str(previous_records.get(code).name or "").strip() if previous_records.get(code) else ""
+            name = source_name
+            item = {
+                "employee_code": code,
+                "name": name,
+                "saved_account": saved,
+                "candidate_account": candidate,
+            }
+            if not saved:
+                missing.append(item)
+            elif candidate and candidate != saved:
+                changed.append(item)
+
+        return {
+            "factory": factory,
+            "current_count": len(current_codes),
+            "missing_bank_accounts": missing,
+            "changed_bank_accounts": changed,
+            "missing_count": len(missing),
+            "changed_count": len(changed),
+        }
+    finally:
+        current_wb.close()
+        previous_wb.close()
+        previous_values_wb.close()
+
+
 def map_owner_data_to_current_workbook(
     current_path: Path,
     previous_path: Path,

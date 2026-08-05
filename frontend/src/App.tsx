@@ -383,10 +383,34 @@ type MappingSummary = {
   new_count: number
   inactive_count: number
   deduction_review_count?: number
+  bank_missing_count?: number
+  bank_changed_count?: number
+  bank_accounts_saved?: number
+  bank_backup_status?: string
   matched_codes?: string[]
   new_codes?: string[]
   inactive_codes?: string[]
   deduction_review_codes?: string[]
+}
+
+type MappingBankAccount = {
+  employee_code: string
+  name: string
+  saved_account: string
+  candidate_account: string
+}
+
+type MappingBankInspection = {
+  current_count: number
+  missing_count: number
+  changed_count: number
+  missing_bank_accounts: MappingBankAccount[]
+  changed_bank_accounts: MappingBankAccount[]
+}
+
+type MappingBankDecision = {
+  mode: 'keep' | 'candidate' | 'custom'
+  account: string
 }
 
 type WorkDayRow = {
@@ -500,6 +524,9 @@ function App() {
   const [output2ChoiceOpen, setOutput2ChoiceOpen] = useState(false)
   const [employeeCardChoiceOpen, setEmployeeCardChoiceOpen] = useState(false)
   const [finalCopyConflictOpen, setFinalCopyConflictOpen] = useState(false)
+  const [mappingBankInspection, setMappingBankInspection] = useState<MappingBankInspection | null>(null)
+  const [mappingBankDecisions, setMappingBankDecisions] = useState<Record<string, MappingBankDecision>>({})
+  const [mappingAllowMissingBankAccounts, setMappingAllowMissingBankAccounts] = useState(false)
   const [pendingFactorySwitch, setPendingFactorySwitch] = useState<FactoryMode | null>(null)
   const [smartSettingsOpen, setSmartSettingsOpen] = useState(false)
   const [supportOpen, setSupportOpen] = useState(false)
@@ -1166,6 +1193,43 @@ function App() {
     }
   }
 
+  async function finishOwnerMapping(
+    bankUpdates: Array<{ employee_code: string; account_number: string; name: string }>,
+    allowMissingBankAccounts: boolean,
+  ) {
+    if (!mappingCurrentFile || !mappingPreviousFile) return
+
+    setMappingLoading(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const uploadForm = new FormData()
+      uploadForm.append('current_file', mappingCurrentFile)
+      uploadForm.append('previous_file', mappingPreviousFile)
+      uploadForm.append('factory', factoryMode)
+      uploadForm.append('smart_scan', String(smartScanEnabled))
+      uploadForm.append('smart_mapping', String(smartMappingEnabled))
+      uploadForm.append('bank_updates', JSON.stringify(bankUpdates))
+      uploadForm.append('allow_missing_bank_accounts', String(allowMissingBankAccounts))
+      const response = await axios.post(`${API_BASE}/attendance/map-owner-data`, uploadForm, {
+        responseType: 'blob',
+      })
+      downloadBlob(
+        response.data,
+        readableSourceExportFilename(factoryMode, mappingCurrentFile.name, 'Output1_Output2', 'zip'),
+      )
+      const summary = readMappingSummary(response.headers['x-mapping-summary'])
+      setMappingBankInspection(null)
+      setMappingBankDecisions({})
+      setMappingAllowMissingBankAccounts(false)
+      setMessage(mappingSummaryMessage(summary))
+    } catch (err) {
+      setError(await readAxiosErrorAsync(err, 'Không gán được dữ liệu'))
+    } finally {
+      setMappingLoading(false)
+    }
+  }
+
   async function mapOwnerData() {
     if (!mappingCurrentFile || !mappingPreviousFile) return
 
@@ -1179,20 +1243,55 @@ function App() {
       uploadForm.append('factory', factoryMode)
       uploadForm.append('smart_scan', String(smartScanEnabled))
       uploadForm.append('smart_mapping', String(smartMappingEnabled))
-      const response = await axios.post(`${API_BASE}/attendance/map-owner-data`, uploadForm, {
-        responseType: 'blob',
-      })
-      downloadBlob(
-        response.data,
-        readableSourceExportFilename(factoryMode, mappingCurrentFile.name, 'Output1_Output2', 'zip'),
-      )
-      const summary = readMappingSummary(response.headers['x-mapping-summary'])
-      setMessage(mappingSummaryMessage(summary))
+      const response = await axios.post<MappingBankInspection>(`${API_BASE}/attendance/map-owner-data/inspect`, uploadForm)
+      if (response.data.missing_count || response.data.changed_count) {
+        const decisions: Record<string, MappingBankDecision> = {}
+        for (const item of response.data.missing_bank_accounts) {
+          decisions[item.employee_code] = { mode: 'custom', account: '' }
+        }
+        for (const item of response.data.changed_bank_accounts) {
+          decisions[item.employee_code] = { mode: 'keep', account: item.saved_account }
+        }
+        setMappingBankInspection(response.data)
+        setMappingBankDecisions(decisions)
+        setMappingAllowMissingBankAccounts(false)
+        return
+      }
+      await finishOwnerMapping([], true)
     } catch (err) {
-      setError(await readAxiosErrorAsync(err, 'Không gán được dữ liệu'))
+      setError(await readAxiosErrorAsync(err, 'Không kiểm tra được dữ liệu tài khoản trước khi gán'))
     } finally {
       setMappingLoading(false)
     }
+  }
+
+  async function confirmOwnerMappingBankAccounts() {
+    if (!mappingBankInspection) return
+    const updates: Array<{ employee_code: string; account_number: string; name: string }> = []
+    for (const item of [...mappingBankInspection.missing_bank_accounts, ...mappingBankInspection.changed_bank_accounts]) {
+      const decision = mappingBankDecisions[item.employee_code]
+      const account = decision?.mode === 'candidate'
+        ? item.candidate_account
+        : decision?.mode === 'custom'
+          ? decision.account.replace(/\D/g, '')
+          : ''
+      if (account) {
+        if (account.length < 8 || account.length > 20) {
+          setError(`Số tài khoản của mã ${item.employee_code} phải có từ 8 đến 20 chữ số.`)
+          return
+        }
+        updates.push({ employee_code: item.employee_code, account_number: account, name: item.name })
+      }
+    }
+    const unresolvedMissing = mappingBankInspection.missing_bank_accounts.filter((item) => {
+      const decision = mappingBankDecisions[item.employee_code]
+      return !(decision?.mode === 'candidate' ? item.candidate_account : decision?.mode === 'custom' ? decision.account.replace(/\D/g, '') : '')
+    })
+    if (unresolvedMissing.length && !mappingAllowMissingBankAccounts) {
+      setError(`Còn ${unresolvedMissing.length} mã thiếu số tài khoản. Hãy nhập đủ hoặc bật “Cho phép gán tạm mã thiếu”.`)
+      return
+    }
+    await finishOwnerMapping(updates, mappingAllowMissingBankAccounts)
   }
 
   function isNormalizationRequired(
@@ -2591,6 +2690,125 @@ function App() {
               </button>
             </div>
             <button type="button" className="export-choice-cancel" onClick={() => setFinalCopyConflictOpen(false)}>Hủy</button>
+          </section>
+        </div>
+      )}
+
+      {mappingBankInspection && (
+        <div className="export-choice-backdrop" role="presentation" onMouseDown={() => !mappingLoading && setMappingBankInspection(null)}>
+          <section
+            className="export-choice-dialog mapping-bank-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="mapping-bank-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <p className="export-choice-kicker">KIỂM TRA TÀI KHOẢN TRƯỚC KHI GÁN</p>
+            <h2 id="mapping-bank-title">Phát hiện dữ liệu ngân hàng cần xác nhận</h2>
+            <p className="export-choice-description">
+              Output 2 sau khi gán sẽ lấy tài khoản từ kho Ngân hàng theo mã nhân viên. Bạn có thể nhập số mới, dùng số trong bản cũ,
+              giữ số đang lưu hoặc cho phép xuất tạm mã chưa có tài khoản.
+            </p>
+
+            {mappingBankInspection.missing_bank_accounts.length > 0 && (
+              <div className="mapping-bank-section">
+                <h3>Thiếu tài khoản ({mappingBankInspection.missing_bank_accounts.length})</h3>
+                <div className="mapping-bank-list">
+                  {mappingBankInspection.missing_bank_accounts.map((item) => {
+                    const decision = mappingBankDecisions[item.employee_code] ?? { mode: 'custom' as const, account: '' }
+                    return (
+                      <div className="mapping-bank-row" key={`missing-${item.employee_code}`}>
+                        <div><strong>{item.employee_code}</strong><span>{item.name || 'Chưa có tên'}</span></div>
+                        {item.candidate_account ? (
+                          <select
+                            value={decision.mode}
+                            onChange={(event) => setMappingBankDecisions((current) => ({
+                              ...current,
+                              [item.employee_code]: { ...decision, mode: event.target.value as MappingBankDecision['mode'] },
+                            }))}
+                          >
+                            <option value="custom">Nhập tay</option>
+                            <option value="candidate">Dùng số từ bản cũ ({item.candidate_account})</option>
+                          </select>
+                        ) : <span className="mapping-bank-muted">Chưa có số trong bản cũ</span>}
+                        {decision.mode === 'custom' && (
+                          <input
+                            className="table-input mapping-bank-input"
+                            inputMode="numeric"
+                            placeholder="Nhập 8–20 chữ số"
+                            value={decision.account}
+                            onChange={(event) => setMappingBankDecisions((current) => ({
+                              ...current,
+                              [item.employee_code]: { ...decision, account: event.target.value.replace(/\D/g, '') },
+                            }))}
+                          />
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            {mappingBankInspection.changed_bank_accounts.length > 0 && (
+              <div className="mapping-bank-section">
+                <h3>Tài khoản khác với số đang lưu ({mappingBankInspection.changed_bank_accounts.length})</h3>
+                <div className="mapping-bank-list">
+                  {mappingBankInspection.changed_bank_accounts.map((item) => {
+                    const decision = mappingBankDecisions[item.employee_code] ?? { mode: 'keep' as const, account: item.saved_account }
+                    return (
+                      <div className="mapping-bank-row" key={`changed-${item.employee_code}`}>
+                        <div><strong>{item.employee_code}</strong><span>{item.name || 'Chưa có tên'}</span></div>
+                        <select
+                          value={decision.mode}
+                          onChange={(event) => setMappingBankDecisions((current) => ({
+                            ...current,
+                            [item.employee_code]: { ...decision, mode: event.target.value as MappingBankDecision['mode'] },
+                          }))}
+                        >
+                          <option value="keep">Giữ số đang lưu ({item.saved_account})</option>
+                          <option value="candidate">Dùng số từ bản cũ ({item.candidate_account})</option>
+                          <option value="custom">Nhập số khác</option>
+                        </select>
+                        {decision.mode === 'custom' && (
+                          <input
+                            className="table-input mapping-bank-input"
+                            inputMode="numeric"
+                            placeholder="Nhập 8–20 chữ số"
+                            value={decision.account}
+                            onChange={(event) => setMappingBankDecisions((current) => ({
+                              ...current,
+                              [item.employee_code]: { ...decision, account: event.target.value.replace(/\D/g, '') },
+                            }))}
+                          />
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            {mappingBankInspection.missing_bank_accounts.length > 0 && (
+              <label className="mapping-bank-allow-missing">
+                <input
+                  type="checkbox"
+                  checked={mappingAllowMissingBankAccounts}
+                  onChange={(event) => setMappingAllowMissingBankAccounts(event.target.checked)}
+                />
+                <span>Cho phép gán tạm mã thiếu tài khoản (Output 2 sẽ để trống các mã đó)</span>
+              </label>
+            )}
+            <div className="export-choice-options mapping-bank-actions">
+              <button type="button" className="export-choice-card bank-save-choice" disabled={mappingLoading} onClick={() => void confirmOwnerMappingBankAccounts()}>
+                <strong>{mappingLoading ? 'Đang gán...' : 'Xác nhận và Gán & xuất'}</strong>
+                <span>Tài khoản đã xác nhận sẽ lưu vào kho Ngân hàng và cố gắng sao lưu lên Drive.</span>
+              </button>
+              <button type="button" className="export-choice-card formula-only" disabled={mappingLoading} onClick={() => setMappingBankInspection(null)}>
+                <strong>Hủy thao tác gán</strong>
+                <span>Không tạo Output mới và không thay đổi kho tài khoản.</span>
+              </button>
+            </div>
           </section>
         </div>
       )}
@@ -7318,6 +7536,11 @@ function mappingSummaryMessage(summary: MappingSummary | null) {
   const newCodes = compactCodeList(summary.new_codes)
   const inactiveCodes = compactCodeList(summary.inactive_codes)
   const reviewCodes = compactCodeList(summary.deduction_review_codes)
+  const bankMessage = summary.bank_accounts_saved
+    ? `Đã lưu ${summary.bank_accounts_saved} tài khoản mới${summary.bank_backup_status === 'saved_to_drive' ? ' và sao lưu lên Drive' : ' trên máy'}.`
+    : summary.bank_missing_count
+      ? `Còn ${summary.bank_missing_count} mã chưa có tài khoản trong kho Ngân hàng.`
+      : ''
   return [
     `Đã gán dữ liệu: ${summary.matched_count} mã khớp.`,
     `Tháng mới có ${summary.new_count} mã mới${newCodes ? ` (${newCodes})` : ''}.`,
@@ -7325,6 +7548,7 @@ function mappingSummaryMessage(summary: MappingSummary | null) {
     summary.deduction_review_count
       ? `${summary.deduction_review_count} mã có ứng/phạt tháng cũ đã được để trống và đánh dấu ?${reviewCodes ? ` (${reviewCodes})` : ''}.`
       : 'Không có khoản ứng/phạt cũ cần đánh dấu.',
+    bankMessage,
   ].join(' ')
 }
 
