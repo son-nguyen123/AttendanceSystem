@@ -4862,7 +4862,7 @@ function PayrollOverview({
           <Input label="Lương 1 ngày công" value={calculatedDailySalaryValue(form)} onChange={() => undefined} type="number" readOnly />
           <Input label="Lương 1 giờ công" value={calculatedHourlySalaryValue(form)} onChange={() => undefined} type="number" readOnly />
           <Input label="Thưởng" value={form.bonus} onChange={(value) => onFormChange({ ...form, bonus: value })} type="number" />
-          <Input label="Ứng lương + phạt" value={form.advance_or_penalty} onChange={(value) => onFormChange({ ...form, advance_or_penalty: value })} type="number" />
+          <Input label="Ứng lương (tháng này)" value={form.advance_or_penalty} onChange={(value) => onFormChange({ ...form, advance_or_penalty: value })} type="number" />
           <label className="field field-wide">
             <span>Ghi chú dòng h+7</span>
             <textarea value={form.note} onChange={(event) => onFormChange({ ...form, note: event.target.value })} />
