@@ -44,6 +44,10 @@
   background: #fff;
 }
 
+.mapping-bank-row-direct {
+  grid-template-columns: minmax(135px, .65fr) minmax(300px, 2.35fr);
+}
+
 .mapping-bank-row > div:first-child {
   display: flex;
   flex-direction: column;
@@ -57,7 +61,7 @@
 }
 
 .mapping-bank-row select,
-.mapping-bank-input {
+.mapping-bank-row .mapping-bank-input {
   min-width: 0;
   width: 100%;
 }
@@ -3527,64 +3531,8 @@ tbody tr {
   padding: 16px;
 }
 
-.payroll-frame-form-wrap {
-  overflow-x: auto;
-  padding: 16px;
-}
-
-.payroll-frame-form {
-  display: grid;
-  grid-template-columns: 90px 220px 130px 145px 145px 125px 120px 110px 110px 120px 155px;
-  width: max-content;
-  min-width: 100%;
-  border: 1px solid #1f2937;
-  background: #ffffff;
-}
-
-.payroll-frame-form .field {
-  gap: 0;
-  min-width: 0;
-  border-right: 1px solid #1f2937;
-}
-
-.payroll-frame-form .field:last-child {
-  border-right: 0;
-}
-
-.payroll-frame-form .field span {
-  display: grid;
-  min-height: 58px;
-  padding: 8px 6px;
-  place-items: center;
-  border-bottom: 1px solid #1f2937;
-  color: #111827;
-  background: #ffff00;
-  font-size: 12px;
-  font-weight: 800;
-  line-height: 1.25;
-  text-align: center;
-}
-
-.payroll-frame-form .field input {
-  height: 46px;
-  border: 0;
-  border-radius: 0;
-  background: #c4d79b;
-  text-align: center;
-}
-
-.payroll-frame-form .field:nth-child(-n + 2) input {
-  background: #ffff00;
-}
-
-.payroll-frame-form .readonly-field input {
-  color: #263238;
-  opacity: 1;
-}
-
-.payroll-profile-notes {
-  grid-template-columns: minmax(180px, .45fr) minmax(320px, 1.55fr);
-  padding: 12px 0 0;
+.payroll-new-form-grid textarea {
+  min-height: 40px;
 }
 
 .field {

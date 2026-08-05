@@ -2889,7 +2889,7 @@ function App() {
                   {mappingBankInspection.missing_bank_accounts.map((item) => {
                     const decision = mappingBankDecisions[item.employee_code] ?? { mode: 'custom' as const, account: '' }
                     return (
-                      <div className="mapping-bank-row" key={`missing-${item.employee_code}`}>
+                      <div className={`mapping-bank-row${item.candidate_account ? '' : ' mapping-bank-row-direct'}`} key={`missing-${item.employee_code}`}>
                         <div><strong>{item.employee_code}</strong><span>{item.name || 'Chưa có tên'}</span></div>
                         {item.candidate_account ? (
                           <select
@@ -2902,7 +2902,7 @@ function App() {
                             <option value="custom">Nhập tay</option>
                             <option value="candidate">Dùng số từ bản cũ ({item.candidate_account})</option>
                           </select>
-                        ) : <span className="mapping-bank-muted">Chưa có số trong bản cũ</span>}
+                        ) : null}
                         {decision.mode === 'custom' && (
                           <input
                             className="table-input mapping-bank-input"
@@ -4920,27 +4920,22 @@ function PayrollOverview({
           <h2>Thông tin lương</h2>
           <span>{selectedCode || 'Chưa chọn'}</span>
         </div>
-        <div className="payroll-frame-form-wrap">
-          <div className="payroll-frame-form" aria-label="Các cột khung Output 2 mới">
-            <Input label="Mã" value={selectedCode} onChange={() => undefined} readOnly />
-            <Input label="Tên nhân viên / Ghi chú" value={form.name} onChange={(value) => onFormChange({ ...form, name: value })} />
-            <Input label="Mức Lương" value={form.monthly_salary} onChange={(value) => onFormChange({ ...form, monthly_salary: value })} type="number" />
-            <Input label="Lương 1 Ngày Công" value={calculatedDailySalaryValue(form)} onChange={() => undefined} type="number" readOnly />
-            <Input label="Lương 1 Giờ Công" value={calculatedHourlySalaryValue(form)} onChange={() => undefined} type="number" readOnly />
-            <Input label="Số Ngày Đi Làm" value={formatEditableNumber(selectedEmployee?.work_days)} onChange={() => undefined} type="number" readOnly />
-            <Input label="Giờ làm thêm" value={formatEditableNumber(selectedEmployee?.overtime_hours)} onChange={() => undefined} type="number" readOnly />
-            <Input label="Thưởng" value={form.bonus} onChange={(value) => onFormChange({ ...form, bonus: value })} type="number" />
-            <Input label="Phạt NQ" value={formatEditableNumber(selectedEmployee?.nq_penalty)} onChange={() => undefined} type="number" readOnly />
-            <Input label="Ứng Lương" value={form.advance_or_penalty} onChange={(value) => onFormChange({ ...form, advance_or_penalty: value })} type="number" />
-            <Input label={`Lương Tháng ${attendanceData.period.year || ''}`} value={calculatedFrameFinalSalaryValue(form, selectedEmployee)} onChange={() => undefined} type="number" readOnly />
-          </div>
-          <div className="form-grid payroll-profile-notes">
-            <Input label="Bắt đầu làm" value={form.start_work_note} onChange={(value) => onFormChange({ ...form, start_work_note: value })} />
-            <label className="field">
-              <span>Ghi chú dòng h+7</span>
-              <textarea value={form.note} onChange={(event) => onFormChange({ ...form, note: event.target.value })} />
-            </label>
-          </div>
+        <div className="form-grid payroll-new-form-grid" aria-label="Thông tin theo các cột khung Output 2 mới">
+          <Input label="Tên nhân viên" value={form.name} onChange={(value) => onFormChange({ ...form, name: value })} />
+          <Input label="Bắt đầu làm" value={form.start_work_note} onChange={(value) => onFormChange({ ...form, start_work_note: value })} />
+          <Input label="Mức lương tháng" value={form.monthly_salary} onChange={(value) => onFormChange({ ...form, monthly_salary: value })} type="number" />
+          <Input label="Lương 1 ngày công" value={calculatedDailySalaryValue(form)} onChange={() => undefined} type="number" readOnly />
+          <Input label="Lương 1 giờ công" value={calculatedHourlySalaryValue(form)} onChange={() => undefined} type="number" readOnly />
+          <Input label="Số ngày đi làm" value={formatEditableNumber(selectedEmployee?.work_days)} onChange={() => undefined} type="number" readOnly />
+          <Input label="Giờ làm thêm" value={formatEditableNumber(selectedEmployee?.overtime_hours)} onChange={() => undefined} type="number" readOnly />
+          <Input label="Thưởng" value={form.bonus} onChange={(value) => onFormChange({ ...form, bonus: value })} type="number" />
+          <Input label="Phạt NQ" value={formatEditableNumber(selectedEmployee?.nq_penalty)} onChange={() => undefined} type="number" readOnly />
+          <Input label="Ứng lương" value={form.advance_or_penalty} onChange={(value) => onFormChange({ ...form, advance_or_penalty: value })} type="number" />
+          <Input label={`Lương tháng ${attendanceData.period.year || ''}`} value={calculatedFrameFinalSalaryValue(form, selectedEmployee)} onChange={() => undefined} type="number" readOnly />
+          <label className="field">
+            <span>Ghi chú dòng h+7</span>
+            <textarea value={form.note} onChange={(event) => onFormChange({ ...form, note: event.target.value })} />
+          </label>
         </div>
         <div className="payroll-actions">
           <button type="button" disabled={!selectedCode || loading} onClick={onSave}>Lưu thông tin lương</button>
