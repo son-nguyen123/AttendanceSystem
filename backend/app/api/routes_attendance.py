@@ -1,5 +1,7 @@
+import asyncio
 import json
 import shutil
+from threading import Lock
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -41,6 +43,47 @@ STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 TEMPORARY_WORKSPACE_PATH = STORAGE_DIR / "temporary_workspace.json"
 TEMPORARY_WORKSPACE_DIR = STORAGE_DIR / "temporary_workspaces"
 TEMPORARY_WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+PENDING_ANALYSIS_DIR = STORAGE_DIR / "pending_analyses"
+PENDING_ANALYSIS_DIR.mkdir(parents=True, exist_ok=True)
+_CANCELLED_ANALYSES: set[str] = set()
+_CANCELLED_ANALYSES_LOCK = Lock()
+
+
+class AnalysisCancelled(Exception):
+    pass
+
+
+def _mark_analysis_cancelled(request_id: str) -> None:
+    if not request_id:
+        return
+    with _CANCELLED_ANALYSES_LOCK:
+        _CANCELLED_ANALYSES.add(request_id)
+
+
+def _is_analysis_cancelled(request_id: str) -> bool:
+    if not request_id:
+        return False
+    with _CANCELLED_ANALYSES_LOCK:
+        return request_id in _CANCELLED_ANALYSES
+
+
+def _clear_analysis_cancelled(request_id: str) -> None:
+    if not request_id:
+        return
+    with _CANCELLED_ANALYSES_LOCK:
+        _CANCELLED_ANALYSES.discard(request_id)
+
+
+def _raise_if_analysis_cancelled(request_id: str) -> None:
+    if _is_analysis_cancelled(request_id):
+        raise AnalysisCancelled()
+
+
+def _pending_analysis_path(resume_token: str) -> Path:
+    normalized = resume_token.strip().lower()
+    if len(normalized) != 32 or any(character not in "0123456789abcdef" for character in normalized):
+        raise HTTPException(status_code=400, detail="Mã tiếp tục phân tích không hợp lệ")
+    return PENDING_ANALYSIS_DIR / normalized
 
 
 def _temporary_workspace_path(factory: str) -> Path:
@@ -181,6 +224,15 @@ async def inspect_attendance_file(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/attendance/analyze/cancel")
+def cancel_attendance_analysis(
+    request_id: str = Query(..., min_length=8, max_length=128),
+    user: dict = Depends(require_staff_or_owner),
+) -> dict[str, str]:
+    _mark_analysis_cancelled(request_id)
+    return {"status": "cancel_requested"}
+
+
 @router.post("/attendance/analyze")
 async def analyze_attendance(
     file: UploadFile = File(...),
@@ -188,6 +240,7 @@ async def analyze_attendance(
     factory: Literal["factory1", "factory2"] = Form("factory1"),
     smart_scan: bool = Form(True),
     newcomer_benefit: bool = Form(True),
+    request_id: str = Form(""),
     user: dict = Depends(require_staff_or_owner),
 ) -> dict:
     suffix = Path(file.filename or "").suffix.lower()
@@ -196,86 +249,212 @@ async def analyze_attendance(
 
     session_id = uuid4().hex
     session_dir = STORAGE_DIR / session_id
-    session_dir.mkdir(parents=True, exist_ok=True)
+    normalized_raw = False
+    missing_output1_summary = False
+    normalization_summary: dict[str, int] = {}
 
-    uploaded_path = session_dir / f"uploaded{suffix}"
-    original_path = session_dir / f"original{suffix}"
-    uploaded_path.write_bytes(await file.read())
-    (session_dir / "metadata.json").write_text(
-        json.dumps({"filename": file.filename, "normalized_raw": False, "factory": factory}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    staging_manager = TemporaryDirectory(dir=STORAGE_DIR, prefix=f".attendance-analyze-{session_id}-")
+    staging_dir = Path(staging_manager.name)
+    uploaded_path = staging_dir / f"uploaded{suffix}"
+    original_path = staging_dir / f"original{suffix}"
 
     try:
+        # Keep uploads in a staging directory until validation and analysis
+        # finish. Failed workbooks must never become restorable sessions.
+        uploaded_path.write_bytes(await file.read())
+        (staging_dir / "metadata.json").write_text(
+            json.dumps({"filename": file.filename, "normalized_raw": False, "factory": factory}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        _raise_if_analysis_cancelled(request_id)
+
         if smart_scan:
-            inspect_workbook_for_role(uploaded_path, "analysis", factory=factory)
+            await asyncio.to_thread(inspect_workbook_for_role, uploaded_path, "analysis", factory=factory)
+        _raise_if_analysis_cancelled(request_id)
         if factory == "factory2":
             shutil.copy2(uploaded_path, original_path)
-            result = analyze_factory2_workbook(original_path)
-            source_employee_count = result["summary"].get(
+            result = await asyncio.to_thread(analyze_factory2_workbook, original_path)
+            _raise_if_analysis_cancelled(request_id)
+            summary = result.get("summary") or {}
+            if not summary.get("blocks"):
+                raise ValueError("Khong tim thay nhan vien co gio cham trong bang Xuong 2")
+            source_employee_count = summary.get(
                 "source_employee_count",
-                result["summary"]["blocks"],
+                summary["blocks"],
             )
-            retained_employee_count = result["summary"]["blocks"]
-            result["session_id"] = session_id
-            result["filename"] = file.filename
-            result["factory"] = factory
-            result["normalized_raw"] = False
-            result["missing_output1_summary"] = False
-            result["normalization_summary"] = {
+            retained_employee_count = summary["blocks"]
+            normalization_summary = {
                 "raw_employee_count": source_employee_count,
                 "retained_employee_count": retained_employee_count,
                 "discarded_empty_employee_count": source_employee_count - retained_employee_count,
             }
-            save_automatic_overrides(
-                session_dir,
-                apply_newcomer_first_day_benefits(result, factory) if newcomer_benefit else [],
-            )
-            return result
 
-        layout = inspect_workbook_layout(uploaded_path)
-        if layout.requires_normalization and not normalize_raw:
-            shutil.rmtree(session_dir, ignore_errors=True)
-            return {
-                "requires_normalization": True,
-                "message": "File raw tu may cham cong chua co khung nhap phan tich.",
-                "sheet_name": layout.sheet_name,
+        if factory != "factory2":
+            layout = await asyncio.to_thread(inspect_workbook_layout, uploaded_path)
+            _raise_if_analysis_cancelled(request_id)
+            if layout.requires_normalization and not normalize_raw:
+                pending_dir = _pending_analysis_path(session_id)
+                metadata = {
+                    "filename": file.filename,
+                    "normalized_raw": False,
+                    "factory": factory,
+                    "layout": {
+                        "sheet_name": layout.sheet_name,
+                        "raw_employee_count": layout.raw_employee_count,
+                        "retained_employee_count": layout.retained_employee_count,
+                        "discarded_empty_employee_count": layout.discarded_empty_employee_count,
+                        "detected_block_count": layout.detected_block_count,
+                        "missing_output1_summary": layout.missing_output1_summary,
+                    },
+                }
+                (staging_dir / "metadata.json").write_text(
+                    json.dumps(metadata, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                pending_dir.mkdir(parents=True, exist_ok=False)
+                for staged_path in staging_dir.iterdir():
+                    shutil.move(str(staged_path), str(pending_dir / staged_path.name))
+                staging_manager.cleanup()
+                return {
+                    "requires_normalization": True,
+                    "resume_token": session_id,
+                    "message": "File raw tu may cham cong chua co khung nhap phan tich.",
+                    "sheet_name": layout.sheet_name,
+                    "raw_employee_count": layout.raw_employee_count,
+                    "retained_employee_count": layout.retained_employee_count,
+                    "discarded_empty_employee_count": layout.discarded_empty_employee_count,
+                    "detected_block_count": layout.detected_block_count,
+                    "missing_output1_summary": layout.missing_output1_summary,
+                }
+
+            if layout.requires_normalization:
+                await asyncio.to_thread(normalize_raw_attendance_workbook, uploaded_path, original_path)
+                _raise_if_analysis_cancelled(request_id)
+                normalized_raw = True
+                (staging_dir / "metadata.json").write_text(
+                    json.dumps({"filename": file.filename, "normalized_raw": True, "factory": factory}, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            else:
+                shutil.copy2(uploaded_path, original_path)
+
+            result = await asyncio.to_thread(analyze_workbook, original_path)
+            _raise_if_analysis_cancelled(request_id)
+            summary = result.get("summary") or {}
+            if not summary.get("blocks"):
+                raise ValueError("Khong tim thay dong nhan vien co du lieu cham cong trong file Excel")
+            missing_output1_summary = layout.missing_output1_summary
+            normalization_summary = {
                 "raw_employee_count": layout.raw_employee_count,
                 "retained_employee_count": layout.retained_employee_count,
                 "discarded_empty_employee_count": layout.discarded_empty_employee_count,
-                "detected_block_count": layout.detected_block_count,
-                "missing_output1_summary": layout.missing_output1_summary,
             }
 
-        if layout.requires_normalization:
-            normalize_raw_attendance_workbook(uploaded_path, original_path)
-            (session_dir / "metadata.json").write_text(
-                json.dumps({"filename": file.filename, "normalized_raw": True, "factory": factory}, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        else:
-            shutil.copy2(uploaded_path, original_path)
-
-        result = analyze_workbook(original_path)
+        _raise_if_analysis_cancelled(request_id)
+        session_dir.mkdir(parents=True, exist_ok=False)
+        for staged_path in staging_dir.iterdir():
+            shutil.move(str(staged_path), str(session_dir / staged_path.name))
+        staging_manager.cleanup()
+    except AnalysisCancelled:
+        staging_manager.cleanup()
+        shutil.rmtree(session_dir, ignore_errors=True)
+        raise HTTPException(status_code=409, detail="Đã hủy phân tích; file chưa được lưu")
     except Exception as exc:
+        staging_manager.cleanup()
         shutil.rmtree(session_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=f"Không đọc được file Excel: {exc}") from exc
+    finally:
+        _clear_analysis_cancelled(request_id)
 
     result["session_id"] = session_id
     result["filename"] = file.filename
     result["factory"] = factory
-    result["normalized_raw"] = layout.requires_normalization
-    result["missing_output1_summary"] = layout.missing_output1_summary
-    result["normalization_summary"] = {
-        "raw_employee_count": layout.raw_employee_count,
-        "retained_employee_count": layout.retained_employee_count,
-        "discarded_empty_employee_count": layout.discarded_empty_employee_count,
-    }
+    result["normalized_raw"] = normalized_raw
+    result["missing_output1_summary"] = missing_output1_summary
+    result["normalization_summary"] = normalization_summary
     save_automatic_overrides(
         session_dir,
         apply_newcomer_first_day_benefits(result, factory) if newcomer_benefit else [],
     )
     return result
+
+
+@router.post("/attendance/analyze/continue")
+async def continue_attendance_analysis(
+    resume_token: str = Form(...),
+    newcomer_benefit: bool = Form(True),
+    request_id: str = Form(""),
+    user: dict = Depends(require_staff_or_owner),
+) -> dict:
+    pending_dir = _pending_analysis_path(resume_token)
+    if not pending_dir.exists():
+        raise HTTPException(status_code=404, detail="Phiên bổ sung khung đã hết hạn hoặc không còn tồn tại")
+
+    session_dir = STORAGE_DIR / resume_token
+    try:
+        metadata = json.loads((pending_dir / "metadata.json").read_text(encoding="utf-8"))
+        if metadata.get("factory") != "factory1":
+            raise ValueError("Phiên tiếp tục không thuộc Xưởng 1")
+        uploaded_paths = list(pending_dir.glob("uploaded.*"))
+        if len(uploaded_paths) != 1:
+            raise ValueError("Không tìm thấy file đã tải lên")
+        uploaded_path = uploaded_paths[0]
+        original_path = pending_dir / f"original{uploaded_path.suffix.lower()}"
+        layout = metadata.get("layout") or {}
+
+        _raise_if_analysis_cancelled(request_id)
+        await asyncio.to_thread(normalize_raw_attendance_workbook, uploaded_path, original_path)
+        _raise_if_analysis_cancelled(request_id)
+        result = await asyncio.to_thread(analyze_workbook, original_path)
+        _raise_if_analysis_cancelled(request_id)
+        summary = result.get("summary") or {}
+        if not summary.get("blocks"):
+            raise ValueError("Không tìm thấy dòng nhân viên có dữ liệu chấm công trong file Excel")
+
+        metadata["normalized_raw"] = True
+        (pending_dir / "metadata.json").write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        if session_dir.exists():
+            raise ValueError("Phiên phân tích đã tồn tại")
+        pending_dir.replace(session_dir)
+    except AnalysisCancelled:
+        shutil.rmtree(pending_dir, ignore_errors=True)
+        raise HTTPException(status_code=409, detail="Đã hủy phân tích; file chưa được lưu")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        shutil.rmtree(pending_dir, ignore_errors=True)
+        shutil.rmtree(session_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=f"Không đọc được file Excel: {exc}") from exc
+    finally:
+        _clear_analysis_cancelled(request_id)
+
+    result["session_id"] = resume_token
+    result["filename"] = metadata.get("filename") or uploaded_path.name
+    result["factory"] = "factory1"
+    result["normalized_raw"] = True
+    result["missing_output1_summary"] = bool(layout.get("missing_output1_summary"))
+    result["normalization_summary"] = {
+        "raw_employee_count": int(layout.get("raw_employee_count") or summary["blocks"]),
+        "retained_employee_count": int(layout.get("retained_employee_count") or summary["blocks"]),
+        "discarded_empty_employee_count": int(layout.get("discarded_empty_employee_count") or 0),
+    }
+    save_automatic_overrides(
+        session_dir,
+        apply_newcomer_first_day_benefits(result, "factory1") if newcomer_benefit else [],
+    )
+    return result
+
+
+@router.delete("/attendance/analyze/pending/{resume_token}")
+def discard_pending_attendance_analysis(
+    resume_token: str,
+    user: dict = Depends(require_staff_or_owner),
+) -> dict[str, str]:
+    shutil.rmtree(_pending_analysis_path(resume_token), ignore_errors=True)
+    return {"status": "deleted"}
 
 
 @router.post("/attendance/factory2/convert-legacy")

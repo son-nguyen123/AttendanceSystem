@@ -2316,6 +2316,12 @@ h2 {
   background: #ffffff;
 }
 
+.analysis-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
 .recalculation-panel {
   margin-top: 12px;
 }
@@ -5220,6 +5226,14 @@ td {
   .history-period-actionbar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .analysis-actions {
+    width: 100%;
+  }
+
+  .analysis-actions > button {
+    flex: 1 1 0;
   }
 
   .header-side {

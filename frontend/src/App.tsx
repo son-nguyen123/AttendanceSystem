@@ -4,6 +4,7 @@ import './App.css'
 
 const API_BASE = 'http://127.0.0.1:8000/api'
 const WORKSPACE_RESTORE_TIMEOUT_MS = 8000
+const ANALYSIS_TIMEOUT_MS = 5 * 60 * 1000
 const ROLE_LOGIN_ENABLED = false
 const SMART_SETTINGS_KEY = 'attendance-smart-settings'
 // v8 invalidates the short-lived v7 workspace cache that could persist the raw
@@ -80,6 +81,7 @@ type AnalyzeResponse = {
 
 type NormalizationRequiredResponse = {
   requires_normalization: true
+  resume_token: string
   message: string
   sheet_name: string
   raw_employee_count: number
@@ -93,6 +95,12 @@ type NormalizationSummary = {
   raw_employee_count: number
   retained_employee_count: number
   discarded_empty_employee_count: number
+}
+
+type AnalysisRequestConfig = {
+  signal?: AbortSignal
+  timeout?: number
+  requestId?: string
 }
 
 type FactoryMode = 'factory1' | 'factory2'
@@ -575,6 +583,9 @@ function App() {
   const [historySearchResults, setHistorySearchResults] = useState<HistorySearchResult[]>([])
   const [historyFilters, setHistoryFilters] = useState({ employee_code: '', month: '', year: '' })
   const [loading, setLoading] = useState(false)
+  const analysisAbortControllerRef = useRef<AbortController | null>(null)
+  const analysisRequestIdRef = useRef<string | null>(null)
+  const analysisCommittedRef = useRef(false)
   const [recalculateLoading, setRecalculateLoading] = useState(false)
   const [mappingLoading, setMappingLoading] = useState(false)
   const [recalculateOutputKind, setRecalculateOutputKind] = useState<'output1' | 'output2'>('output1')
@@ -1222,8 +1233,24 @@ function App() {
     setMessage('Đã đổi loại Output. Vui lòng chọn lại file để hệ thống kiểm tra đúng cấu trúc.')
   }
 
+  function cancelAnalysis() {
+    if (!analysisAbortControllerRef.current) return
+    const requestId = analysisRequestIdRef.current
+    if (requestId && !analysisCommittedRef.current) {
+      void axios.post(`${API_BASE}/attendance/analyze/cancel`, null, { params: { request_id: requestId } }).catch(() => undefined)
+    }
+    analysisAbortControllerRef.current.abort()
+    setMessage(
+      analysisCommittedRef.current
+        ? 'Đã dừng tải phần bổ sung. Phiên phân tích đã được lưu.'
+        : 'Đã hủy phân tích. File chưa được lưu vào phiên tạm.',
+    )
+    setError(null)
+  }
+
   async function analyze() {
     if (!file) return
+    if (analysisAbortControllerRef.current) return
 
     if (
       data &&
@@ -1242,12 +1269,31 @@ function App() {
     setError(null)
     setMessage(null)
 
+    const controller = new AbortController()
+    const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+    analysisAbortControllerRef.current = controller
+    analysisRequestIdRef.current = requestId
+    analysisCommittedRef.current = false
+    let timedOut = false
+    const timeoutId = window.setTimeout(() => {
+      timedOut = true
+      if (!analysisCommittedRef.current) {
+        void axios.post(`${API_BASE}/attendance/analyze/cancel`, null, { params: { request_id: requestId } }).catch(() => undefined)
+      }
+      controller.abort()
+    }, ANALYSIS_TIMEOUT_MS)
+    const requestConfig: AnalysisRequestConfig = {
+      signal: controller.signal,
+      timeout: ANALYSIS_TIMEOUT_MS,
+      requestId,
+    }
+
     try {
       const [latestInfo, knownCodes] = await Promise.all([
-        fetchLatestHistoryInfo(),
-        fetchKnownHistoryCodes(),
+        fetchLatestHistoryInfo(requestConfig),
+        fetchKnownHistoryCodes(factoryMode, requestConfig),
       ])
-      let response = await postAnalyze(false)
+      let response = await postAnalyze(false, requestConfig)
       let responseData = response.data
 
       if (isNormalizationRequired(responseData)) {
@@ -1267,11 +1313,13 @@ function App() {
         })
 
         if (!shouldNormalize) {
+          void discardPendingAnalysis(responseData.resume_token)
           setMessage('Đã hủy phân tích vì file raw chưa có khung nhập.')
           return
         }
 
-        response = await postAnalyze(true)
+        if (controller.signal.aborted) return
+        response = await continueAnalyze(responseData.resume_token, requestConfig)
         responseData = response.data
       }
 
@@ -1280,14 +1328,14 @@ function App() {
         return
       }
 
+      analysisCommittedRef.current = true
+
       setLatestHistoryInfo(latestInfo)
       setKnownHistoryCodes(knownCodes)
-      const memory = await fetchReviewMemory(responseData.period)
-      const reviewItems = buildPayrollReviewItems(responseData, latestInfo, knownCodes, memory)
-      setReviewMemory(memory)
       setData(responseData)
       setWorkspaceCalculationVersion(ATTENDANCE_CALCULATION_VERSION)
-      setPayrollReviewItems(reviewItems)
+      setReviewMemory({ period: null, records: [] })
+      setPayrollReviewItems([])
       setReviewSourceSessionId(responseData.session_id)
       setRestoredAnalysisFilename(responseData.filename)
       setPeriodMonth(responseData.period?.month ? String(responseData.period.month) : '')
@@ -1295,9 +1343,18 @@ function App() {
       setEmployeeListMonth(responseData.period?.month ? String(responseData.period.month) : '')
       setEmployeeListYear(responseData.period?.year ? String(responseData.period.year) : '')
       setActiveView('attendance')
-      if (isOwner) {
-        await refreshPayroll(responseData.session_id)
-      }
+      // Core Excel analysis is complete. Show the result immediately while
+      // the independent review/payroll data finishes loading.
+      setLoading(false)
+      const memoryPromise = fetchReviewMemory(responseData.period, requestConfig)
+      const payrollPromise = isOwner
+        ? refreshPayroll(responseData.session_id, true, requestConfig)
+        : Promise.resolve()
+      const memory = await memoryPromise
+      await payrollPromise
+      const reviewItems = buildPayrollReviewItems(responseData, latestInfo, knownCodes, memory)
+      setReviewMemory(memory)
+      setPayrollReviewItems(reviewItems)
       const infoMessages: string[] = []
       if (responseData.factory === 'factory2') {
         const sourceCount = responseData.normalization_summary?.raw_employee_count ?? responseData.summary.blocks
@@ -1335,22 +1392,70 @@ function App() {
         setMessage(infoMessages.join(' '))
       }
     } catch (err) {
-      setError(readAxiosError(err, 'Không phân tích được file'))
+      const analysisWasCommitted = analysisCommittedRef.current
+      const requestTimedOut = timedOut || (axios.isAxiosError(err) && ['ECONNABORTED', 'ETIMEDOUT'].includes(err.code || ''))
+      if (requestTimedOut) {
+        setError(
+          analysisWasCommitted
+            ? 'Phân tích đã xong nhưng tải phần hiển thị quá lâu. Phiên tạm đã được lưu, bạn có thể tải lại trang.'
+            : 'Phân tích quá lâu nên app đã tự dừng. File chưa được lưu; bạn có thể thử lại với file nhỏ hơn.',
+        )
+      } else if (controller.signal.aborted || axios.isCancel(err)) {
+        setMessage(
+          analysisWasCommitted
+            ? 'Đã dừng tải phần bổ sung. Phiên phân tích đã được lưu.'
+            : 'Đã hủy phân tích. File chưa được lưu vào phiên tạm.',
+        )
+      } else {
+        setError(
+          readAxiosError(
+            err,
+            analysisWasCommitted ? 'Phân tích đã lưu nhưng chưa tải đủ dữ liệu hiển thị' : 'Không phân tích được file',
+          ),
+        )
+      }
     } finally {
+      window.clearTimeout(timeoutId)
+      if (analysisAbortControllerRef.current === controller) analysisAbortControllerRef.current = null
+      if (analysisRequestIdRef.current === requestId) analysisRequestIdRef.current = null
+      analysisCommittedRef.current = false
       setLoading(false)
     }
   }
 
-  function postAnalyze(normalizeRaw: boolean) {
+  function postAnalyze(
+    normalizeRaw: boolean,
+    requestConfig?: AnalysisRequestConfig,
+    scanWorkbook = smartScanEnabled,
+  ) {
     if (!file) throw new Error('Chưa chọn file Excel')
 
     const uploadForm = new FormData()
     uploadForm.append('file', file)
     uploadForm.append('normalize_raw', String(normalizeRaw))
     uploadForm.append('factory', factoryMode)
-    uploadForm.append('smart_scan', String(smartScanEnabled))
+    uploadForm.append('smart_scan', String(scanWorkbook))
     uploadForm.append('newcomer_benefit', String(newcomerBenefitEnabled))
-    return axios.post<AnalyzeResponse | NormalizationRequiredResponse>(`${API_BASE}/attendance/analyze`, uploadForm)
+    if (requestConfig?.requestId) uploadForm.append('request_id', requestConfig.requestId)
+    return axios.post<AnalyzeResponse | NormalizationRequiredResponse>(`${API_BASE}/attendance/analyze`, uploadForm, {
+      signal: requestConfig?.signal,
+      timeout: requestConfig?.timeout,
+    })
+  }
+
+  function continueAnalyze(resumeToken: string, requestConfig?: AnalysisRequestConfig) {
+    const continueForm = new FormData()
+    continueForm.append('resume_token', resumeToken)
+    continueForm.append('newcomer_benefit', String(newcomerBenefitEnabled))
+    if (requestConfig?.requestId) continueForm.append('request_id', requestConfig.requestId)
+    return axios.post<AnalyzeResponse>(`${API_BASE}/attendance/analyze/continue`, continueForm, {
+      signal: requestConfig?.signal,
+      timeout: requestConfig?.timeout,
+    })
+  }
+
+  function discardPendingAnalysis(resumeToken: string) {
+    return axios.delete(`${API_BASE}/attendance/analyze/pending/${resumeToken}`)
   }
 
   async function changeNewcomerBenefitEnabled(enabled: boolean) {
@@ -1530,11 +1635,17 @@ function App() {
     return 'requires_normalization' in response && response.requires_normalization === true
   }
 
-  async function refreshPayroll(sessionId = data?.session_id, syncSelection = true) {
+  async function refreshPayroll(
+    sessionId = data?.session_id,
+    syncSelection = true,
+    requestConfig?: AnalysisRequestConfig,
+  ) {
     if (!sessionId) return
 
     const response = await axios.get<{ employees: PayrollEmployee[] }>(`${API_BASE}/payroll/employees`, {
       params: { session_id: sessionId },
+      signal: requestConfig?.signal,
+      timeout: requestConfig?.timeout,
     })
     const employees = response.data.employees
     setPayrollEmployees(employees)
@@ -1560,24 +1671,30 @@ function App() {
     }
   }
 
-  async function fetchLatestHistoryInfo() {
+  async function fetchLatestHistoryInfo(requestConfig?: AnalysisRequestConfig) {
     const response = await axios.get<LatestHistoryInfo>(`${API_BASE}/history/latest-period`, {
       params: { factory: factoryMode },
+      signal: requestConfig?.signal,
+      timeout: requestConfig?.timeout,
     })
     return response.data
   }
 
-  async function fetchKnownHistoryCodes(factory = factoryMode) {
+  async function fetchKnownHistoryCodes(factory = factoryMode, requestConfig?: AnalysisRequestConfig) {
     const response = await axios.get<{ employee_codes: string[] }>(`${API_BASE}/history/employee-codes`, {
       params: { factory },
+      signal: requestConfig?.signal,
+      timeout: requestConfig?.timeout,
     })
     return response.data.employee_codes
   }
 
-  async function fetchReviewMemory(period: PeriodInfo): Promise<ReviewMemory | null> {
+  async function fetchReviewMemory(period: PeriodInfo, requestConfig?: AnalysisRequestConfig): Promise<ReviewMemory | null> {
     if (!period.month || !period.year) return null
     const response = await axios.get<ReviewMemory>(`${API_BASE}/history/review-memory`, {
       params: { month: period.month, year: period.year, factory: factoryMode },
+      signal: requestConfig?.signal,
+      timeout: requestConfig?.timeout,
     })
     return response.data.period ? response.data : null
   }
@@ -3819,9 +3936,16 @@ function App() {
           disabled={loading}
           onFile={selectAnalysisFile}
         />
-        <button type="button" disabled={!file || loading} onClick={analyze}>
-          {loading ? 'Đang phân tích...' : 'Phân tích tạm'}
-        </button>
+        <div className="analysis-actions">
+          <button type="button" disabled={!file || loading} onClick={analyze}>
+            {loading ? 'Đang phân tích...' : 'Phân tích tạm'}
+          </button>
+          {loading && (
+            <button type="button" className="secondary-button" onClick={cancelAnalysis}>
+              Hủy phân tích
+            </button>
+          )}
+        </div>
       </section>
 
       <section className="upload-panel mapping-panel">
