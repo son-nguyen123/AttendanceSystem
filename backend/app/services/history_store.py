@@ -17,6 +17,7 @@ from app.services.payroll_store import (
     load_payroll_data,
     merge_missing_payroll_entries,
     normalize_employee_code,
+    normalize_employee_name,
 )
 from app.services.owner_profile_sync import sync_latest_final_copy_profile
 from app.services.payroll_workbook import export_payroll_workbook, preview_payroll
@@ -213,7 +214,7 @@ def save_session_to_history(
         for block in analysis.get("blocks", []):
             employee_code = normalize_employee_code(block["employee_code"])
             payroll = payroll_by_code.get(employee_code, {})
-            employee_name = get_payroll_entry(employee_code, factory).name or payroll.get("name") or ""
+            employee_name = normalize_employee_name(get_payroll_entry(employee_code, factory).name or payroll.get("name"))
             conn.execute(
                 """
                 INSERT INTO employee_monthly_records (
@@ -427,7 +428,7 @@ def update_employee_monthly_record(period_id: str, employee_code: str, updates: 
         advance_or_penalty = _num(updates.get("advance_or_penalty"), _num(existing["advance_or_penalty"]))
         final_salary = total_hours * hourly_salary + bonus - advance_or_penalty
         values = {
-            "employee_name": str(updates.get("employee_name", existing["employee_name"]) or "").strip(),
+            "employee_name": normalize_employee_name(updates.get("employee_name", existing["employee_name"])),
             "total_hours": _round_number(total_hours),
             "work_days": _round_number(work_days),
             "monthly_salary": _round_number(monthly_salary),
@@ -762,7 +763,7 @@ def get_attendance_overview(year: int | None = None, factory: str | None = None)
             },
         )
         if not current_name and str(row["employee_name"] or "").strip():
-            item["employee_name"] = str(row["employee_name"] or "")
+            item["employee_name"] = normalize_employee_name(row["employee_name"])
 
         month = int(row["month"])
         stats = daily_stats.get((employee_code, month), {"late_count": 0, "issue_count": 0})
@@ -795,7 +796,7 @@ def get_attendance_overview(year: int | None = None, factory: str | None = None)
                 employee_code,
                 {
                     "employee_code": employee_code,
-                    "employee_name": current_name or str(row.get("employee_name") or ""),
+                    "employee_name": current_name or normalize_employee_name(row.get("employee_name")),
                     "months": [_empty_overview_month(item_month) for item_month in range(1, 13)],
                     "total_hours": 0.0,
                     "total_work_days": 0.0,
@@ -805,7 +806,7 @@ def get_attendance_overview(year: int | None = None, factory: str | None = None)
                 },
             )
             if not item["employee_name"] and str(row.get("employee_name") or "").strip():
-                item["employee_name"] = str(row.get("employee_name") or "")
+                item["employee_name"] = normalize_employee_name(row.get("employee_name"))
             item["months"][month - 1] = {
                 "month": month,
                 "total_hours": row["total_hours"],
@@ -1013,7 +1014,7 @@ def _bootstrap_payroll_data_from_history(conn: sqlite3.Connection) -> None:
         if not employee_code or employee_code in existing_by_factory[factory] or employee_code in defaults:
             continue
         defaults[employee_code] = {
-            "name": str(row["employee_name"] or "").strip(),
+            "name": normalize_employee_name(row["employee_name"]),
             "note": str(row["note"] or "").strip(),
         }
 
@@ -1022,10 +1023,10 @@ def _bootstrap_payroll_data_from_history(conn: sqlite3.Connection) -> None:
 
 
 def _current_employee_name(employee_code: object, fallback: object = "", factory: str = "factory1") -> str:
-    fallback_name = str(fallback or "").strip()
+    fallback_name = normalize_employee_name(fallback)
     if fallback_name:
         return fallback_name
-    current_name = get_payroll_entry(normalize_employee_code(employee_code), factory).name.strip()
+    current_name = normalize_employee_name(get_payroll_entry(normalize_employee_code(employee_code), factory).name)
     return current_name
 
 
@@ -1040,7 +1041,7 @@ def _safe_final_copies(factory: str | None = None) -> list[dict]:
 
 def _employee_names_by_code(factory: str = "factory1") -> dict[str, str]:
     return {
-        normalize_employee_code(code): str(entry.get("name") or "").strip()
+        normalize_employee_code(code): normalize_employee_name(entry.get("name"))
         for code, entry in load_payroll_data(factory).items()
         if isinstance(entry, dict)
     }

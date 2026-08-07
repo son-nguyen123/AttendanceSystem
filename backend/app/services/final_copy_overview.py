@@ -6,7 +6,7 @@ from typing import Any
 
 from openpyxl import load_workbook
 
-from app.services.payroll_store import normalize_employee_code
+from app.services.payroll_store import normalize_employee_code, normalize_employee_name
 
 
 SUMMARY_MIN_COL = 32
@@ -93,7 +93,7 @@ def _employee_code(value: object) -> str:
 
 
 def _text(value: object) -> str:
-    return str(value or "").strip()
+    return normalize_employee_name(value)
 
 
 def _number(value: object) -> float | None:

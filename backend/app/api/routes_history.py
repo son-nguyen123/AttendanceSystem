@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field
 from app.api.auth_dependencies import require_owner, require_staff_or_owner
 from app.services.cloud_sync import (
     backup_enabled,
+    delete_drive_final_copy,
+    delete_drive_machine_backup,
     delete_drive_month,
     delete_period_from_cloud,
     list_drive_final_copies,
@@ -95,6 +97,16 @@ def get_final_copies(
     user: dict = Depends(require_owner),
 ) -> dict[str, Any]:
     return {"final_copies": list_drive_final_copies(month=month, year=year, factory=factory)}
+
+
+@router.delete("/final-copies/{copy_id}")
+def delete_history_final_copy(copy_id: str, user: dict = Depends(require_owner)) -> dict[str, Any]:
+    try:
+        return delete_drive_final_copy(copy_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Khong xoa duoc ban sao cuoi cung: {exc}") from exc
 
 
 @router.get("/employee-codes")
@@ -183,20 +195,36 @@ def delete_history_period(
     delete_cloud: bool = Query(default=False),
     user: dict = Depends(require_owner),
 ) -> dict[str, Any]:
+    try:
+        period_detail = get_period_detail(period_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Khong tim thay ky cham cong") from exc
+
     cloud_result: dict[str, Any] | None = None
     if delete_cloud:
         try:
             cloud_result = delete_period_from_cloud(period_id)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Khong xoa duoc tren cloud: {exc}") from exc
+
+    try:
+        drive_result = delete_drive_machine_backup(
+            month=int(period_detail["period"].get("month") or 0),
+            year=int(period_detail["period"].get("year") or 0),
+            factory=str(period_detail["period"].get("factory") or "factory1"),
+        )
+    except Exception as exc:
+        drive_result = {"status": "error", "error_count": 1, "errors": [{"error": str(exc)}]}
+
     try:
         delete_period(period_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Không tìm thấy kỳ chấm công") from exc
     return {
-        "status": "ok",
+        "status": "ok" if drive_result.get("status") == "ok" else "partial",
         "period_id": period_id,
         "cloud_sync": cloud_result,
+        "drive": drive_result,
         "drive_backup": _try_drive_backup("delete_history"),
     }
 
@@ -224,13 +252,20 @@ def delete_history_month(
     try:
         drive_result = delete_drive_month(month=month, year=year, factory=normalized_factory)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Khong xoa duoc thu muc thang tren Drive; lich su local chua bi xoa: {exc}") from exc
+        # Drive is an external, optionally offline copy.  Do not let a
+        # Google Drive permission/sync problem block deletion of the local
+        # attendance history requested by the user.
+        drive_result = {
+            "status": "error",
+            "error_count": 1,
+            "errors": [{"error": str(exc)}],
+        }
 
     for period_id in period_ids:
         delete_period(period_id)
 
     return {
-        "status": "ok",
+        "status": "ok" if drive_result.get("status") == "ok" else "partial",
         "factory": normalized_factory,
         "month": month,
         "year": year,

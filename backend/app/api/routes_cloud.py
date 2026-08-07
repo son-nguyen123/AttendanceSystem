@@ -15,6 +15,8 @@ from app.services.cloud_sync import (
     download_submission_file,
     get_owner_submission,
     get_cloud_config,
+    list_drive_final_copies,
+    list_drive_analysis_copies,
     list_owner_submissions,
     run_drive_backup,
     run_analysis_excel_copy,
@@ -45,6 +47,7 @@ class CloudConfigRequest(BaseModel):
     sync_on_save: bool = False
     drive_backup_enabled: bool = False
     drive_backup_dir: str = ""
+    local_export_dir: str = ""
     backup_on_history_change: bool = True
 
 
@@ -52,6 +55,7 @@ class SessionCopyRequest(BaseModel):
     session_id: str
     month: int
     year: int
+    replace_existing: bool = False
 
 
 class OpenDriveFolderRequest(BaseModel):
@@ -149,9 +153,20 @@ def save_session_excel_copy(request: SessionCopyRequest, user: dict = Depends(re
             request.month,
             request.year,
             factory=factory,
+            replace_existing=request.replace_existing,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Không lưu được bản đang phân tích: {exc}") from exc
+
+
+@router.get("/session-copy/existing")
+def get_existing_session_copies(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2000, le=2100),
+    factory: str = Query("factory1"),
+    user: dict = Depends(require_owner),
+) -> dict[str, Any]:
+    return {"copies": list_drive_analysis_copies(month=month, year=year, factory=factory)}
 
 
 @router.post("/final-copy")
@@ -161,7 +176,7 @@ async def save_final_excel_copy(
     year: int = Form(...),
     factory: str = Form("factory1"),
     smart_scan: bool = Form(True),
-    profile_sync_mode: str = Form("replace_manual"),
+    replace_existing: bool = Form(False),
     user: dict = Depends(require_owner),
 ) -> dict[str, Any]:
     suffix = Path(file.filename or "").suffix.lower()
@@ -176,19 +191,29 @@ async def save_final_excel_copy(
     uploaded_path.write_bytes(await file.read())
 
     try:
-        if smart_scan:
-            profile = inspect_workbook_for_role(uploaded_path, "final_copy", factory=factory)
-            ensure_period_matches(profile, month, year, "Bản sao cuối cùng")
-        if profile_sync_mode not in {"replace_manual", "keep_manual"}:
-            raise HTTPException(status_code=400, detail="Lựa chọn đồng bộ hồ sơ không hợp lệ")
+        # Final copies are the long-lived payroll source.  They must always
+        # pass the strict new-Output-2 guard; the general smart-scan toggle
+        # must not provide a way to store a legacy/wrong frame.
+        profile = inspect_workbook_for_role(uploaded_path, "final_copy", factory=factory)
+        ensure_period_matches(profile, month, year, "Bản sao cuối cùng")
+        existing_copies = list_drive_final_copies(month=month, year=year, factory=factory)
+        if existing_copies and not replace_existing:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Đã có bản chốt cuối cùng cho tháng {month:02d}/{year}. Hãy xác nhận thay thế bằng file mới.",
+            )
         return run_final_excel_copy(
             uploaded_path,
             file.filename or f"ban_sao_cuoi_cung{suffix}",
             month,
             year,
             factory=factory,
-            profile_sync_mode=profile_sync_mode,
+            profile_sync_mode="replace_manual",
+            replace_existing=replace_existing,
         )
+    except HTTPException:
+        shutil.rmtree(session_dir, ignore_errors=True)
+        raise
     except Exception as exc:
         shutil.rmtree(session_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=f"Không lưu được bản sao cuối cùng: {exc}") from exc
@@ -210,11 +235,9 @@ async def detect_final_copy_period(
         with TemporaryDirectory(dir=STORAGE_DIR) as temp_dir:
             uploaded_path = Path(temp_dir) / f"final_copy{suffix}"
             uploaded_path.write_bytes(await file.read())
-            profile = (
-                inspect_workbook_for_role(uploaded_path, "final_copy", factory=factory)
-                if smart_scan
-                else profile_workbook(uploaded_path, factory=factory)
-            )
+            # Always inspect final copies with the strict new-frame guard so
+            # the preview and the save endpoint enforce the same contract.
+            profile = inspect_workbook_for_role(uploaded_path, "final_copy", factory=factory)
             return profile.to_dict()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Không đọc được tháng/năm từ file chốt: {exc}") from exc

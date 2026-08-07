@@ -42,9 +42,9 @@ class PayrollFactoryScopeTests(unittest.TestCase):
             factory="factory2",
         )
 
-        self.assertEqual(payroll_store.get_payroll_entry("1001", "factory1").name, "Nhan vien Xuong 1")
+        self.assertEqual(payroll_store.get_payroll_entry("1001", "factory1").name, "NHAN VIEN XUONG 1")
         self.assertEqual(payroll_store.get_payroll_entry("1001", "factory1").hourly_salary, 10)
-        self.assertEqual(payroll_store.get_payroll_entry("1001", "factory2").name, "Nhan vien Xuong 2")
+        self.assertEqual(payroll_store.get_payroll_entry("1001", "factory2").name, "NHAN VIEN XUONG 2")
         self.assertEqual(payroll_store.get_payroll_entry("1001", "factory2").hourly_salary, 20)
 
         saved = json.loads(self.data_path.read_text(encoding="utf-8"))

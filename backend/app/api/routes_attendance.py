@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 
 from app.api.auth_dependencies import ROLE_LOGIN_ENABLED, LOCAL_OWNER_USER, require_staff_or_owner
@@ -17,7 +18,8 @@ from app.services.bank_payroll import backup_registry_to_drive
 from app.services.bank_payroll import save_accounts
 from app.services.auth_service import AuthError, get_user_by_token
 from app.services.employee_cards import export_employee_cards_zip
-from app.services.factory2_workbook import analyze_factory2_workbook, export_factory2_output1, write_factory2_standard_source
+from app.services.factory2_workbook import analyze_factory2_workbook, export_factory2_output1, export_factory2_output2, write_factory2_standard_source
+from app.services.factory1_workbook import export_factory1_legacy_output2
 from app.services.owner_profile_sync import sync_latest_final_copy_profile
 from app.services.payroll_workbook import apply_payroll_to_workbook
 from app.services.workbook_processor import analyze_workbook, export_processed_workbook
@@ -37,6 +39,31 @@ router = APIRouter(tags=["attendance"])
 STORAGE_DIR = Path(__file__).resolve().parents[2] / "storage"
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 TEMPORARY_WORKSPACE_PATH = STORAGE_DIR / "temporary_workspace.json"
+TEMPORARY_WORKSPACE_DIR = STORAGE_DIR / "temporary_workspaces"
+TEMPORARY_WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _temporary_workspace_path(factory: str) -> Path:
+    return TEMPORARY_WORKSPACE_DIR / f"{factory}.json"
+
+
+def _temporary_workspace_candidates(factory: str | None = None) -> list[Path]:
+    if factory in {"factory1", "factory2"}:
+        return [_temporary_workspace_path(factory)]
+    return [TEMPORARY_WORKSPACE_PATH, _temporary_workspace_path("factory1"), _temporary_workspace_path("factory2")]
+
+
+def _delete_workspace_for_session(session_id: str) -> None:
+    for workspace_path in _temporary_workspace_candidates():
+        if not workspace_path.exists():
+            continue
+        try:
+            workspace = json.loads(workspace_path.read_text(encoding="utf-8"))
+        except Exception:
+            workspace_path.unlink(missing_ok=True)
+            continue
+        if str((workspace.get("data") or {}).get("session_id") or "") == session_id:
+            workspace_path.unlink(missing_ok=True)
 
 
 class AttendanceReviewOverride(BaseModel):
@@ -69,17 +96,27 @@ class AttendanceSubmitResponse(BaseModel):
 
 
 @router.get("/attendance/temporary-workspace")
-def get_temporary_workspace(user: dict = Depends(require_staff_or_owner)) -> dict:
-    if not TEMPORARY_WORKSPACE_PATH.exists():
+async def get_temporary_workspace(
+    factory: Literal["factory1", "factory2"] = Query("factory1"),
+    user: dict = Depends(require_staff_or_owner),
+) -> dict:
+    workspace_path = _temporary_workspace_path(factory)
+    # Read the old single-slot file once for backward compatibility, but only
+    # return it when it belongs to the requested factory.
+    if not workspace_path.exists() and TEMPORARY_WORKSPACE_PATH.exists():
+        workspace_path = TEMPORARY_WORKSPACE_PATH
+    if not workspace_path.exists():
         raise HTTPException(status_code=404, detail="Không có phiên tạm")
     try:
-        workspace = json.loads(TEMPORARY_WORKSPACE_PATH.read_text(encoding="utf-8"))
+        workspace = json.loads(workspace_path.read_text(encoding="utf-8"))
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Phiên tạm bị lỗi định dạng") from exc
 
+    if str(workspace.get("factory") or (workspace.get("data") or {}).get("factory") or "") != factory:
+        raise HTTPException(status_code=404, detail="Không có phiên tạm cho xưởng này")
     session_id = str((workspace.get("data") or {}).get("session_id") or "")
     if not session_id or not (STORAGE_DIR / session_id).exists():
-        TEMPORARY_WORKSPACE_PATH.unlink(missing_ok=True)
+        workspace_path.unlink(missing_ok=True)
         raise HTTPException(status_code=404, detail="Nguồn của phiên tạm không còn tồn tại")
     return workspace
 
@@ -99,15 +136,27 @@ def save_temporary_workspace(
     if not (STORAGE_DIR / session_id).exists():
         raise HTTPException(status_code=404, detail="Không tìm thấy dữ liệu nguồn của phiên tạm")
 
-    temporary_path = TEMPORARY_WORKSPACE_PATH.with_suffix(".tmp")
-    temporary_path.write_text(json.dumps(workspace, ensure_ascii=False), encoding="utf-8")
-    temporary_path.replace(TEMPORARY_WORKSPACE_PATH)
+    temporary_path = _temporary_workspace_path(factory)
+    temporary_path_tmp = temporary_path.with_suffix(".tmp")
+    temporary_path_tmp.write_text(json.dumps(workspace, ensure_ascii=False), encoding="utf-8")
+    temporary_path_tmp.replace(temporary_path)
     return {"status": "ok"}
 
 
 @router.delete("/attendance/temporary-workspace")
-def delete_temporary_workspace(user: dict = Depends(require_staff_or_owner)) -> dict[str, str]:
-    TEMPORARY_WORKSPACE_PATH.unlink(missing_ok=True)
+def delete_temporary_workspace(
+    factory: Literal["factory1", "factory2"] = Query("factory1"),
+    user: dict = Depends(require_staff_or_owner),
+) -> dict[str, str]:
+    _temporary_workspace_path(factory).unlink(missing_ok=True)
+    if TEMPORARY_WORKSPACE_PATH.exists():
+        try:
+            legacy = json.loads(TEMPORARY_WORKSPACE_PATH.read_text(encoding="utf-8"))
+            legacy_factory = str(legacy.get("factory") or (legacy.get("data") or {}).get("factory") or "")
+            if legacy_factory == factory:
+                TEMPORARY_WORKSPACE_PATH.unlink(missing_ok=True)
+        except Exception:
+            TEMPORARY_WORKSPACE_PATH.unlink(missing_ok=True)
     return {"status": "ok"}
 
 
@@ -229,6 +278,83 @@ async def analyze_attendance(
     return result
 
 
+@router.post("/attendance/factory2/convert-legacy")
+async def convert_factory2_legacy_workbook(
+    file: UploadFile = File(...),
+    output_kind: Literal["output1", "output2"] = Form("output1"),
+    user: dict = Depends(require_staff_or_owner),
+) -> FileResponse:
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in {".xlsx", ".xlsm"}:
+        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xlsx hoặc .xlsm")
+
+    conversion_dir = STORAGE_DIR / f"factory2-convert-{uuid4().hex}"
+    conversion_dir.mkdir(parents=True, exist_ok=True)
+    source_path = conversion_dir / f"legacy{suffix}"
+    output_path = conversion_dir / f"Xuong2_{output_kind.upper()}_KhungMoi.xlsx"
+    source_path.write_bytes(await file.read())
+
+    try:
+        analysis = analyze_factory2_workbook(source_path)
+        if not analysis.get("summary", {}).get("blocks"):
+            raise ValueError("Không tìm thấy nhân viên có giờ chấm trong bảng dọc Xưởng 2")
+        if output_kind == "output2":
+            export_factory2_output2(
+                source_path,
+                output_path,
+                include_saved_data=True,
+                factory="factory2",
+                carry_source_payroll_data=True,
+            )
+        else:
+            export_factory2_output1(source_path, output_path, factory="factory2")
+    except Exception as exc:
+        shutil.rmtree(conversion_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=f"Không chuyển được bảng Xưởng 2: {exc}") from exc
+
+    period = analysis.get("period") or {}
+    month = int(period.get("month") or 0)
+    year = int(period.get("year") or 0)
+    period_label = f"{year}-{month:02d}" if month and year else "KhongRoKy"
+    return FileResponse(
+        output_path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=f"Xuong2_{period_label}_{'Output2_KhungMoi' if output_kind == 'output2' else 'Output1'}.xlsx",
+        background=BackgroundTask(shutil.rmtree, conversion_dir, ignore_errors=True),
+    )
+
+
+@router.post("/attendance/factory1/convert-legacy")
+async def convert_factory1_legacy_workbook(
+    file: UploadFile = File(...),
+    user: dict = Depends(require_staff_or_owner),
+) -> FileResponse:
+    """Convert an older Factory 1 workbook into the current formula frame."""
+
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in {".xls", ".xlsx", ".xlsm"}:
+        raise HTTPException(status_code=400, detail="Chá»‰ há»— trá»£ file .xls, .xlsx hoáº·c .xlsm")
+
+    conversion_dir = STORAGE_DIR / f"factory1-convert-{uuid4().hex}"
+    conversion_dir.mkdir(parents=True, exist_ok=True)
+    source_path = conversion_dir / f"legacy{suffix}"
+    output_path = conversion_dir / "Xuong1_Output2_KhungMoi.xlsx"
+    source_path.write_bytes(await file.read())
+
+    try:
+        export_factory1_legacy_output2(source_path, output_path)
+    except Exception as exc:
+        shutil.rmtree(conversion_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=f"KhÃ´ng chuyá»ƒn Ä‘Æ°á»£c báº£ng cÅ© XÆ°á»Ÿng 1: {exc}") from exc
+
+    return FileResponse(
+        output_path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename="Xuong1_Output2_KhungMoi.xlsx",
+        background=BackgroundTask(shutil.rmtree, conversion_dir, ignore_errors=True),
+    )
+
+
 @router.get("/attendance/export/{session_id}")
 def export_attendance(session_id: str, user: dict = Depends(require_staff_or_owner)) -> FileResponse:
     session_dir = STORAGE_DIR / session_id
@@ -307,13 +433,7 @@ def delete_temporary_attendance_session(
     session_dir = STORAGE_DIR / session_id
     if session_dir.exists():
         shutil.rmtree(session_dir)
-    if TEMPORARY_WORKSPACE_PATH.exists():
-        try:
-            workspace = json.loads(TEMPORARY_WORKSPACE_PATH.read_text(encoding="utf-8"))
-            if str((workspace.get("data") or {}).get("session_id") or "") == session_id:
-                TEMPORARY_WORKSPACE_PATH.unlink(missing_ok=True)
-        except Exception:
-            TEMPORARY_WORKSPACE_PATH.unlink(missing_ok=True)
+    _delete_workspace_for_session(session_id)
     return {"status": "ok"}
 
 

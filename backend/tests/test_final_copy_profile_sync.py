@@ -9,7 +9,7 @@ from openpyxl import Workbook
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.models.attendance import EmployeeBlock
-from app.services import bank_account_store, drive_backup, payroll_store
+from app.services import bank_account_store, drive_backup, owner_profile_sync, payroll_store
 from app.services.owner_profile_sync import sync_owner_profiles_from_workbook
 from app.services.payroll_workbook import _build_employee_preview, _write_payroll_block
 
@@ -77,7 +77,7 @@ class FinalCopyProfileSyncTests(unittest.TestCase):
         entry = payroll_store.get_payroll_entry("1006")
 
         self.assertEqual(result["updated_codes"], ["1006"])
-        self.assertEqual(entry.name, "Tên từ bản chốt")
+        self.assertEqual(entry.name, "TEN TU BAN CHOT")
         self.assertEqual(entry.start_work_note, "02/2023")
         self.assertEqual(entry.note, "Ghi chú cần đồng bộ")
         self.assertEqual(entry.hourly_salary, 25_000)
@@ -104,7 +104,7 @@ class FinalCopyProfileSyncTests(unittest.TestCase):
     def test_final_copies_are_partitioned_by_factory(self) -> None:
         root = Path(self.temp_dir.name)
         source = root / "final.xlsx"
-        Workbook().save(source)
+        _write_reformed_final_copy_source(source)
         config = {"drive_backup_dir": str(root / "drive")}
         with patch("app.services.drive_backup.sync_owner_profiles_from_workbook", return_value={"status": "ok"}):
             factory1 = drive_backup.create_final_excel_copy(config, source, source.name, 7, 2026, factory="factory1")
@@ -142,8 +142,31 @@ class FinalCopyProfileSyncTests(unittest.TestCase):
 
         entry = payroll_store.get_payroll_entry("1006")
         self.assertIn("1006", result["conflict_codes"])
-        self.assertEqual(entry.name, "Tên nhập tay")
+        self.assertEqual(entry.name, "TEN NHAP TAY")
         self.assertEqual(entry.hourly_salary, 20_000)
+
+    def test_latest_final_copy_is_authoritative_even_when_newer_than_current_attendance(self) -> None:
+        root = Path(self.temp_dir.name)
+        older = root / "older-final.xlsx"
+        newest = root / "newest-final.xlsx"
+        _write_simple_final_copy_source(older, "Tên cũ", 20_000)
+        _write_simple_final_copy_source(newest, "Tên mới", 30_000)
+        payroll_store.save_payroll_entry(
+            "1006",
+            payroll_store.PayrollEntry(name="Tên nhập tay", hourly_salary=1),
+        )
+
+        copies = [
+            {"path": str(older), "month": 6, "year": 2026, "modified_at": "2026-06-30T10:00:00"},
+            {"path": str(newest), "month": 7, "year": 2026, "modified_at": "2026-07-31T10:00:00"},
+        ]
+        with patch("app.services.cloud_sync.list_drive_final_copies", return_value=copies):
+            result = owner_profile_sync.sync_latest_final_copy_profile(root / "attendance-june.xlsx", "factory1")
+
+        entry = payroll_store.get_payroll_entry("1006")
+        self.assertEqual(result["source_month"], 7)
+        self.assertEqual(entry.name, "TEN MOI")
+        self.assertEqual(entry.hourly_salary, 30_000)
 
     def test_history_or_analysis_file_cannot_refresh_profiles(self) -> None:
         source = Path(self.temp_dir.name) / "anything.xlsx"
@@ -182,6 +205,54 @@ class FinalCopyProfileSyncTests(unittest.TestCase):
         self.assertTrue(str(sheet["AJ10"].value).startswith("ghi chú dài"))
         self.assertGreater(sheet.row_dimensions[10].height, 20)
         workbook.close()
+
+
+def _write_simple_final_copy_source(path: Path, name: str, hourly_salary: int) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet["AF4"] = "Tong gio cong"
+    sheet["AH4"] = "Ma"
+    sheet["AI4"] = "Ten nhan vien / Ghi chu"
+    sheet["AJ4"] = "Muc Luong"
+    sheet["AL4"] = "Luong 1 Gio Cong"
+    sheet["AH9"] = "1006"
+    sheet["AI9"] = name
+    sheet["AJ9"] = hourly_salary * 26 * 8
+    sheet["AL9"] = hourly_salary
+    workbook.save(path)
+    workbook.close()
+
+
+def _write_reformed_final_copy_source(path: Path) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet["A3"] = "Att. Time"
+    sheet["C3"] = "2026-07-01 ~ 2026-07-31"
+    sheet["A5"] = "Mã:"
+    sheet["C5"] = "1006"
+    headers = [
+        "Tổng giờ công",
+        "Mức tiền phạt NQ trên giờ công (đ)",
+        "Mã",
+        "Tên nhân viên / Ghi chú",
+        "Mức Lương",
+        "Lương 1 Ngày Công",
+        "Lương 1 Giờ Công",
+        "Số Ngày Đi Làm",
+        "Giờ làm thêm",
+        "Thưởng",
+        "Phạt NQ",
+        "Ứng Lương",
+        "Lương Tháng 7/2026",
+    ]
+    for column, value in enumerate(headers, start=32):
+        sheet.cell(row=4, column=column).value = value
+    sheet["AF9"] = 160
+    sheet["AH9"] = "1006"
+    sheet["AI9"] = "Nhân viên 1006"
+    sheet["AJ9"] = 5_200_000
+    workbook.save(path)
+    workbook.close()
 
 
 if __name__ == "__main__":

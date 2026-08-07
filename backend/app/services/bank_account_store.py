@@ -5,6 +5,9 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from collections import defaultdict
+
+from app.services.payroll_store import normalize_employee_name
 
 
 STORAGE_DIR = Path(__file__).resolve().parents[2] / "storage"
@@ -29,6 +32,8 @@ def sync_accounts_from_final_copy(factory: str, profiles: dict[str, dict[str, An
     registry = _load_registry()
     updated_codes: list[str] = []
     conflict_codes: list[str] = []
+    duplicate_accounts: list[dict[str, Any]] = []
+    accepted_accounts: dict[str, str] = {}
     for raw_code, profile in profiles.items():
         code = _employee_code(raw_code)
         if not code or not isinstance(profile, dict):
@@ -45,11 +50,28 @@ def sync_accounts_from_final_copy(factory: str, profiles: dict[str, dict[str, An
             # explicit bank/mapping conflict dialog is the place to decide.
             conflict_codes.append(code)
             continue
+        owners = {
+            owner_code
+            for owner_code in _account_owners(registry, normalized_factory, account)
+            if owner_code != code
+        }
+        owners.update(
+            owner_code
+            for owner_code, owner_account in accepted_accounts.items()
+            if owner_account == account and owner_code != code
+        )
+        if owners:
+            conflict_codes.append(code)
+            duplicate_accounts.append({
+                "account_number": account,
+                "employee_codes": sorted({code, *owners}, key=_employee_sort_key),
+            })
+            continue
         next_value = {
             **current,
             "factory": normalized_factory,
             "employee_code": code,
-            "name": str(profile.get("name") or current.get("name") or "").strip(),
+            "name": normalize_employee_name(profile.get("name") or current.get("name")),
             "account_number": account,
             "conflict_accounts": [],
         }
@@ -57,6 +79,7 @@ def sync_accounts_from_final_copy(factory: str, profiles: dict[str, dict[str, An
             continue
         next_value["updated_at"] = datetime.now().isoformat(timespec="seconds")
         registry[key] = next_value
+        accepted_accounts[code] = account
         updated_codes.append(code)
     if updated_codes:
         _atomic_json(REGISTRY_PATH, registry)
@@ -64,8 +87,9 @@ def sync_accounts_from_final_copy(factory: str, profiles: dict[str, dict[str, An
         "status": "ok",
         "updated": len(updated_codes),
         "updated_codes": updated_codes,
-        "conflict_count": len(conflict_codes),
-        "conflict_codes": conflict_codes,
+        "conflict_count": len(set(conflict_codes)),
+        "conflict_codes": sorted(set(conflict_codes), key=_employee_sort_key),
+        "duplicate_accounts": _unique_duplicate_groups(duplicate_accounts),
     }
 
 
@@ -88,7 +112,7 @@ def list_account_overview(factory: str) -> dict[str, Any]:
                 rows[code] = {
                     "factory": normalized_factory,
                     "employee_code": code,
-                    "name": str(employee.get("name") or "").strip(),
+                    "name": normalize_employee_name(employee.get("name")),
                 }
     except Exception:
         # The bank screen must still be usable if a legacy profile file is
@@ -102,9 +126,10 @@ def list_account_overview(factory: str) -> dict[str, Any]:
         if not code:
             continue
         rows.setdefault(code, {"factory": normalized_factory, "employee_code": code})
-        rows[code]["name"] = rows[code].get("name") or str(value.get("name") or "").strip()
+        rows[code]["name"] = rows[code].get("name") or normalize_employee_name(value.get("name"))
 
     accounts: list[dict[str, Any]] = []
+    duplicate_codes = _duplicate_codes_by_code(normalized_factory, registry)
     for code, base in rows.items():
         saved = registry.get(_key(normalized_factory, code), {})
         account = normalize_account_number(saved.get("account_number"))
@@ -112,6 +137,7 @@ def list_account_overview(factory: str) -> dict[str, Any]:
             **base,
             "account_number": account,
             "conflict_accounts": list(saved.get("conflict_accounts") or []),
+            "conflict_codes": duplicate_codes.get(code, []),
             "updated_at": saved.get("updated_at"),
         })
 
@@ -125,7 +151,65 @@ def list_account_overview(factory: str) -> dict[str, Any]:
         "total": len(accounts),
         "with_account": sum(bool(row["account_number"]) for row in accounts),
         "without_account": sum(not row["account_number"] for row in accounts),
+        "duplicate_accounts": _duplicate_account_groups(normalized_factory, registry),
     }
+
+
+def find_duplicate_account_groups(factory: str, registry: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    return _duplicate_account_groups(_factory(factory), _load_registry() if registry is None else registry)
+
+
+def _duplicate_account_groups(factory: str, registry: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    by_account: dict[str, list[str]] = defaultdict(list)
+    normalized_factory = _factory(factory)
+    for key, value in registry.items():
+        if not isinstance(value, dict) or _factory(value.get("factory") or key.split(":", 1)[0]) != normalized_factory:
+            continue
+        code = _employee_code(value.get("employee_code") or key.rsplit(":", 1)[-1])
+        account = normalize_account_number(value.get("account_number"))
+        if code and account and code not in by_account[account]:
+            by_account[account].append(code)
+    return [
+        {"account_number": account, "employee_codes": sorted(codes, key=_employee_sort_key)}
+        for account, codes in sorted(by_account.items())
+        if len(codes) > 1
+    ]
+
+
+def _duplicate_codes_by_code(factory: str, registry: dict[str, dict[str, Any]]) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for group in _duplicate_account_groups(factory, registry):
+        codes = list(group["employee_codes"])
+        for code in codes:
+            result[code] = [other for other in codes if other != code]
+    return result
+
+
+def _account_owners(registry: dict[str, dict[str, Any]], factory: str, account: str) -> list[str]:
+    normalized_factory = _factory(factory)
+    owners: list[str] = []
+    for key, value in registry.items():
+        if not isinstance(value, dict) or _factory(value.get("factory") or key.split(":", 1)[0]) != normalized_factory:
+            continue
+        if normalize_account_number(value.get("account_number")) != account:
+            continue
+        code = _employee_code(value.get("employee_code") or key.rsplit(":", 1)[-1])
+        if code and code not in owners:
+            owners.append(code)
+    return owners
+
+
+def _unique_duplicate_groups(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    result: list[dict[str, Any]] = []
+    for group in groups:
+        account = str(group.get("account_number") or "")
+        codes = tuple(sorted({str(code) for code in group.get("employee_codes") or []}, key=_employee_sort_key))
+        key = (account, codes)
+        if account and len(codes) > 1 and key not in seen:
+            seen.add(key)
+            result.append({"account_number": account, "employee_codes": list(codes)})
+    return result
 
 
 def _load_registry() -> dict[str, dict[str, Any]]:

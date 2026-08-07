@@ -15,10 +15,12 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 from app.services.cloud_sync import get_cloud_config
-from app.services.bank_account_store import normalize_account_number
+from app.services.bank_account_store import find_duplicate_account_groups, normalize_account_number
+from app.services.payroll_store import normalize_employee_name
 
 
 STORAGE_DIR = Path(__file__).resolve().parents[2] / "storage"
@@ -61,9 +63,10 @@ def scan_official_workbook(path: Path, factory: str) -> dict[str, Any]:
                     values_ws.cell(result_row, name_col).value
                     or formula_ws.cell(result_row, name_col).value
                     or ""
-                ).strip()
+                )
+                name = normalize_employee_name(name)
                 if not name:
-                    name = _find_employee_name(values_ws, result_row, fields)
+                    name = normalize_employee_name(_find_employee_name(values_ws, result_row, fields))
                 salary = _number(values_ws.cell(result_row, fields["final_salary"]).value)
                 calculated_salary = _calculate_salary(values_ws, result_row, fields)
                 # Excel may leave formula cells without cached results (or
@@ -97,10 +100,16 @@ def scan_official_workbook(path: Path, factory: str) -> dict[str, Any]:
         employees = {item["employee_code"]: item for item in active}
 
     registry = _load_registry_with_drive_fallback(factory)
+    duplicate_codes: dict[str, list[str]] = {}
+    for group in find_duplicate_account_groups(factory, registry):
+        codes = [str(code) for code in group.get("employee_codes") or []]
+        for code in codes:
+            duplicate_codes[code] = [other for other in codes if other != code]
     for item in employees.values():
         saved = registry.get(_key(factory, item["employee_code"]), {})
         item["account_number"] = normalize_account_number(saved.get("account_number"))
         item["conflict_accounts"] = list(saved.get("conflict_accounts") or [])
+        item["conflict_codes"] = duplicate_codes.get(item["employee_code"], [])
 
     scan_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
@@ -118,10 +127,18 @@ def scan_official_workbook(path: Path, factory: str) -> dict[str, Any]:
 
 def list_accounts(factory: str) -> dict[str, Any]:
     factory = _factory(factory)
-    records = [
-        value for value in _load_registry().values()
-        if value.get("factory") == factory
-    ]
+    registry = _load_registry()
+    duplicate_codes: dict[str, list[str]] = {}
+    for group in find_duplicate_account_groups(factory, registry):
+        codes = [str(code) for code in group.get("employee_codes") or []]
+        for code in codes:
+            duplicate_codes[code] = [other for other in codes if other != code]
+    records = []
+    for key, value in registry.items():
+        if not isinstance(value, dict) or value.get("factory") != factory:
+            continue
+        code = _employee_code(value.get("employee_code") or key.rsplit(":", 1)[-1])
+        records.append({**value, "conflict_codes": duplicate_codes.get(code, [])})
     return {"factory": factory, "accounts": sorted(records, key=lambda row: _code_sort(row["employee_code"]))}
 
 
@@ -129,6 +146,7 @@ def save_accounts(factory: str, accounts: list[dict[str, Any]]) -> dict[str, Any
     factory = _factory(factory)
     registry = _load_registry()
     updated = 0
+    next_registry = dict(registry)
     for row in accounts:
         code = _employee_code(row.get("employee_code"))
         if not code:
@@ -137,7 +155,7 @@ def save_accounts(factory: str, accounts: list[dict[str, Any]]) -> dict[str, Any
         account = normalize_account_number(raw_account)
         if raw_account and not account:
             raise ValueError(f"Số tài khoản của mã {code} phải có từ 8 đến 20 chữ số.")
-        registry[_key(factory, code)] = {
+        next_registry[_key(factory, code)] = {
             "factory": factory,
             "employee_code": code,
             "name": str(row.get("name") or "").strip(),
@@ -146,6 +164,14 @@ def save_accounts(factory: str, accounts: list[dict[str, Any]]) -> dict[str, Any
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
         updated += 1
+    duplicate_groups = find_duplicate_account_groups(factory, next_registry)
+    if duplicate_groups:
+        details = "; ".join(
+            f"{group['account_number']}: mã {', '.join(group['employee_codes'])}"
+            for group in duplicate_groups[:8]
+        )
+        raise ValueError("Số tài khoản đang trùng giữa các mã, cần kiểm tra lại: " + details)
+    registry = next_registry
     _atomic_json(REGISTRY_PATH, registry)
     return {"status": "ok", "updated": updated}
 
@@ -201,6 +227,7 @@ def import_accounts_from_word(
     conflicts = []
     skipped_existing = []
     updated = 0
+    source_duplicates = _duplicate_source_accounts(found)
     for code, account_names in found.items():
         key = _key(factory, code)
         current = registry.get(key, {})
@@ -211,12 +238,44 @@ def import_accounts_from_word(
         ordered = sorted(accounts)
         conflict_accounts = ordered if len(ordered) > 1 else []
         if conflict_accounts:
-            conflicts.append({"employee_code": code, "accounts": conflict_accounts})
+            conflicts.append({
+                "employee_code": code,
+                "accounts": conflict_accounts,
+                "existing_account": current_account,
+                "existing_name": str(current.get("name") or "").strip(),
+                "file_accounts": sorted(account_names),
+                "name": str(next(iter(account_names.values()), "") or "").strip(),
+            })
+            continue
+        if code in source_duplicates:
+            conflicts.append({
+                "employee_code": code,
+                "accounts": ordered,
+                "duplicate_codes": source_duplicates[code],
+                "reason": "duplicate_account",
+                "existing_account": current_account,
+                "existing_name": str(current.get("name") or "").strip(),
+                "file_accounts": sorted(account_names),
+                "name": str(next(iter(account_names.values()), "") or "").strip(),
+            })
             continue
         if current_account and mode == "fill_missing":
             skipped_existing.append(code)
             continue
         if not ordered:
+            continue
+        existing_owners = [owner for owner in _account_codes(registry, factory, ordered[0]) if owner != code]
+        if existing_owners:
+            conflicts.append({
+                "employee_code": code,
+                "accounts": ordered,
+                "duplicate_codes": existing_owners,
+                "reason": "duplicate_account",
+                "existing_account": current_account,
+                "existing_name": str(current.get("name") or "").strip(),
+                "file_accounts": sorted(account_names),
+                "name": str(next(iter(account_names.values()), "") or "").strip(),
+            })
             continue
         registry[key] = {
             "factory": factory,
@@ -253,6 +312,257 @@ def import_accounts_from_word(
         "month": month,
         "year": year,
     }
+
+
+def import_accounts_from_excel_salary(
+    path: Path,
+    factory: str,
+    month: int,
+    year: int,
+    mode: str = "fill_missing",
+) -> dict[str, Any]:
+    """Import employee/account pairs from the old salary Excel workbook.
+
+    The old salary template is not the official Output 2 layout.  It has a
+    small table headed by ``Mã Nhân Viên`` and ``SỐ TK``.  Some workbooks also
+    contain rows from another month, so a row period in ``NỘI DUNG`` is used
+    as a filter when it is present.
+    """
+    factory = _factory(factory)
+    detected_month, detected_year = detect_excel_salary_period(path)
+    month = detected_month or month
+    year = detected_year or year
+    if not 1 <= month <= 12 or year < 2000:
+        raise ValueError("Tháng hoặc năm lưu không hợp lệ.")
+
+    found: dict[str, dict[str, str]] = {}
+    keep_vba = path.suffix.lower() == ".xlsm"
+    workbook = load_workbook(path, data_only=True, keep_vba=keep_vba)
+    try:
+        for worksheet in workbook.worksheets:
+            header_row, columns = _excel_salary_columns(worksheet)
+            if header_row is None:
+                continue
+            for row in worksheet.iter_rows(min_row=header_row + 1, values_only=True):
+                if not row or max(columns.values()) >= len(row):
+                    continue
+                code = _employee_code(row[columns["code"]])
+                if not code or _normalize(code) in {"stt", "tong", "total"}:
+                    continue
+                account = normalize_account_number(re.sub(r"\D", "", str(row[columns["account"]] or "")))
+                if not account:
+                    continue
+                row_period = _period_from_text(row[columns["period"]]) if "period" in columns else (None, None)
+                if row_period != (None, None) and row_period != (month, year):
+                    continue
+                name = normalize_employee_name(row[columns.get("name", columns["code"])])
+                found.setdefault(code, {})[account] = name
+    finally:
+        workbook.close()
+
+    if not found:
+        raise ValueError("Không tìm thấy cột Mã Nhân Viên và Số TK trong file Excel lương cũ.")
+
+    return _persist_imported_accounts(
+        found,
+        factory=factory,
+        month=month,
+        year=year,
+        mode=mode,
+        source_path=path,
+        source_type="excel_salary",
+    )
+
+
+def detect_excel_salary_period(path: Path) -> tuple[int | None, int | None]:
+    keep_vba = path.suffix.lower() == ".xlsm"
+    workbook = load_workbook(path, data_only=True, keep_vba=keep_vba)
+    texts: list[str] = []
+    try:
+        for worksheet in workbook.worksheets:
+            for row in worksheet.iter_rows():
+                for cell in row:
+                    if cell.value is not None:
+                        texts.append(str(cell.value))
+    finally:
+        workbook.close()
+
+    for text in texts:
+        month, year = _period_from_text(text)
+        if month and year:
+            return month, year
+    filename_match = re.search(r"(?:thang|t)[_ -]?(\d{1,2})[_ -/]+(20\d{2})", path.stem, re.IGNORECASE)
+    if filename_match:
+        month, year = int(filename_match.group(1)), int(filename_match.group(2))
+        if 1 <= month <= 12:
+            return month, year
+    return None, None
+
+
+def _excel_salary_columns(worksheet) -> tuple[int | None, dict[str, int]]:
+    for row_index in range(1, min(worksheet.max_row, 30) + 1):
+        labels = [_normalize(worksheet.cell(row_index, column).value) for column in range(1, worksheet.max_column + 1)]
+        code_column = next((index for index, label in enumerate(labels) if label in {"ma", "ma nhan vien", "ma nv"}), None)
+        account_column = next((index for index, label in enumerate(labels) if label in {"so tk", "so tai khoan", "stk"}), None)
+        if code_column is None or account_column is None:
+            continue
+        name_column = next((index for index, label in enumerate(labels) if "ho ten" in label or "ten nhan vien" in label), None)
+        period_column = next((index for index, label in enumerate(labels) if "noi dung" in label or label == "thang"), None)
+        columns = {"code": code_column, "account": account_column}
+        if name_column is not None:
+            columns["name"] = name_column
+        if period_column is not None:
+            columns["period"] = period_column
+        return row_index, columns
+    return None, {}
+
+
+def _duplicate_source_accounts(found: dict[str, dict[str, str]]) -> dict[str, list[str]]:
+    by_account: dict[str, list[str]] = {}
+    for code, account_names in found.items():
+        for account in account_names:
+            by_account.setdefault(account, []).append(code)
+    result: dict[str, list[str]] = {}
+    for codes in by_account.values():
+        unique_codes = sorted(set(codes), key=_code_sort)
+        if len(unique_codes) < 2:
+            continue
+        for code in unique_codes:
+            result[code] = [other for other in unique_codes if other != code]
+    return result
+
+
+def _account_codes(registry: dict[str, dict[str, Any]], factory: str, account: str) -> list[str]:
+    owners: list[str] = []
+    normalized_factory = _factory(factory)
+    for key, value in registry.items():
+        if not isinstance(value, dict) or _factory(value.get("factory") or key.split(":", 1)[0]) != normalized_factory:
+            continue
+        if normalize_account_number(value.get("account_number")) != account:
+            continue
+        code = _employee_code(value.get("employee_code") or key.rsplit(":", 1)[-1])
+        if code and code not in owners:
+            owners.append(code)
+    return owners
+
+
+def _persist_imported_accounts(
+    found: dict[str, dict[str, str]],
+    *,
+    factory: str,
+    month: int,
+    year: int,
+    mode: str,
+    source_path: Path,
+    source_type: str,
+) -> dict[str, Any]:
+    mode = "replace" if mode == "replace" else "fill_missing"
+    registry = _load_registry()
+    conflicts = []
+    skipped_existing = []
+    updated = 0
+    source_duplicates = _duplicate_source_accounts(found)
+    for code, account_names in found.items():
+        key = _key(factory, code)
+        current = registry.get(key, {})
+        accounts = set(account_names)
+        current_account = normalize_account_number(current.get("account_number"))
+        if current_account and mode == "fill_missing":
+            accounts.add(current_account)
+        ordered = sorted(accounts)
+        conflict_accounts = ordered if len(ordered) > 1 else []
+        if conflict_accounts:
+            conflicts.append({
+                "employee_code": code,
+                "accounts": conflict_accounts,
+                "existing_account": current_account,
+                "existing_name": str(current.get("name") or "").strip(),
+                "file_accounts": sorted(account_names),
+                "name": str(next(iter(account_names.values()), "") or "").strip(),
+            })
+            continue
+        if code in source_duplicates:
+            conflicts.append({
+                "employee_code": code,
+                "accounts": ordered,
+                "duplicate_codes": source_duplicates[code],
+                "reason": "duplicate_account",
+                "existing_account": current_account,
+                "existing_name": str(current.get("name") or "").strip(),
+                "file_accounts": sorted(account_names),
+                "name": str(next(iter(account_names.values()), "") or "").strip(),
+            })
+            continue
+        if current_account and mode == "fill_missing":
+            skipped_existing.append(code)
+            continue
+        if not ordered:
+            continue
+        existing_owners = [owner for owner in _account_codes(registry, factory, ordered[0]) if owner != code]
+        if existing_owners:
+            conflicts.append({
+                "employee_code": code,
+                "accounts": ordered,
+                "duplicate_codes": existing_owners,
+                "reason": "duplicate_account",
+                "existing_account": current_account,
+                "existing_name": str(current.get("name") or "").strip(),
+                "file_accounts": sorted(account_names),
+                "name": str(next(iter(account_names.values()), "") or "").strip(),
+            })
+            continue
+        registry[key] = {
+            "factory": factory,
+            "employee_code": code,
+            "name": str((next(iter(account_names.values()), "") if mode == "replace" else current.get("name")) or ""),
+            "account_number": ordered[0],
+            "conflict_accounts": conflict_accounts,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "source_period": f"{year}-{month:02d}",
+        }
+        updated += 1
+    _atomic_json(REGISTRY_PATH, registry)
+
+    config = get_cloud_config()
+    drive_path = None
+    if config.get("drive_backup_enabled"):
+        target_dir = Path(config["drive_root_path"]) / "DuLieuNganHang" / f"{year}-{month:02d}"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        suffix = source_path.suffix.lower() if source_path.suffix.lower() in {".xlsx", ".xlsm"} else ".xlsx"
+        drive_path = target_dir / f"Xuong{2 if factory == 'factory2' else 1}_{year}-{month:02d}_DanhSachTaiKhoan{suffix}"
+        if source_path.resolve() != drive_path.resolve():
+            shutil.copy2(source_path, drive_path)
+        factory_dir = Path(config["drive_root_path"]) / "DuLieuNganHang" / f"Xuong{2 if factory == 'factory2' else 1}"
+        root_registry = factory_dir / "DanhSachTaiKhoan.json"
+        root_registry.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_json(root_registry, _registry_for_factory(factory))
+
+    return {
+        "status": "ok",
+        "imported": updated,
+        "conflicts": conflicts,
+        "skipped_existing": skipped_existing,
+        "mode": mode,
+        "drive_path": str(drive_path) if drive_path else None,
+        "month": month,
+        "year": year,
+        "source_type": source_type,
+    }
+
+
+def _period_from_text(value: Any) -> tuple[int | None, int | None]:
+    normalized = _normalize(value)
+    patterns = (
+        r"(?:thang|t)\s*(\d{1,2})\s*[/.-]\s*(20\d{2})",
+        r"(\d{1,2})\s*[/.-]\s*(20\d{2})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, normalized, re.IGNORECASE)
+        if match:
+            month, year = int(match.group(1)), int(match.group(2))
+            if 1 <= month <= 12:
+                return month, year
+    return None, None
 
 
 def detect_word_period(path: Path) -> tuple[int | None, int | None]:
@@ -320,6 +630,70 @@ def export_bank_docx(scan_id: str, account_overrides: list[dict[str, Any]] | Non
     output = SESSION_DIR / f"{scan_id}_{filename}"
     _build_document(output, employees, factory_no, period)
     return output, filename
+
+
+def export_bank_excel(scan_id: str, account_overrides: list[dict[str, Any]] | None = None) -> tuple[Path, str]:
+    """Export the scanned payroll rows as the bank's Excel payment layout.
+
+    The account validation is intentionally the same as the legacy Word
+    export.  The resulting workbook follows the user's bank template:
+    employee code, name, account number, transfer amount and payment note.
+    """
+    snapshot_path = SESSION_DIR / f"{scan_id}.json"
+    if not snapshot_path.exists():
+        raise ValueError("PhiÃªn quÃ©t báº£ng lÆ°Æ¡ng khÃ´ng cÃ²n tá»“n táº¡i. HÃ£y quÃ©t láº¡i file.")
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    factory = snapshot["factory"]
+    registry = _load_registry()
+    overrides = {
+        _employee_code(row.get("employee_code")): normalize_account_number(row.get("account_number"))
+        for row in (account_overrides or [])
+        if _employee_code(row.get("employee_code"))
+    }
+    employees = []
+    missing = []
+    seen_accounts: dict[str, str] = {}
+    duplicates = []
+    for item in snapshot["employees"]:
+        saved = registry.get(_key(factory, item["employee_code"]), {})
+        account = overrides.get(item["employee_code"], normalize_account_number(saved.get("account_number")))
+        if not account:
+            missing.append(item["employee_code"])
+        elif account in seen_accounts:
+            duplicates.append(f"{seen_accounts[account]} vÃ  {item['employee_code']}")
+        else:
+            seen_accounts[account] = item["employee_code"]
+        employees.append({**item, "account_number": account})
+    if missing:
+        raise ValueError("ChÆ°a cÃ³ sá»‘ tÃ i khoáº£n cho mÃ£: " + ", ".join(missing[:12]))
+    if duplicates:
+        raise ValueError("PhÃ¡t hiá»‡n sá»‘ tÃ i khoáº£n trÃ¹ng á»Ÿ mÃ£: " + ", ".join(duplicates[:8]))
+
+    month = snapshot.get("month")
+    year = snapshot.get("year")
+    factory_no = "2" if factory == "factory2" else "1"
+    filename = f"Xuong{factory_no}_{year or 'KhongRo'}-{int(month or 0):02d}_BangLuongNganHang.xlsx"
+    output = SESSION_DIR / f"{scan_id}_{filename}"
+    _build_bank_workbook(output, employees, month, year)
+    return output, filename
+
+
+def export_bank_excel_local(
+    scan_id: str,
+    account_overrides: list[dict[str, Any]] | None = None,
+) -> tuple[Path, str]:
+    """Create the bank workbook and copy it to the configured local folder."""
+
+    source_path, filename = export_bank_excel(scan_id, account_overrides)
+    config = get_cloud_config()
+    raw_directory = str(config.get("local_export_dir") or (STORAGE_DIR / "local_exports"))
+    target_directory = Path(raw_directory).expanduser()
+    if not target_directory.is_absolute():
+        target_directory = (STORAGE_DIR / target_directory).resolve()
+    target_directory.mkdir(parents=True, exist_ok=True)
+    target_path = target_directory / filename
+    shutil.copy2(source_path, target_path)
+    return target_path, filename
 
 
 def backup_registry_to_drive(factory: str = "factory1") -> dict[str, Any]:
@@ -462,7 +836,7 @@ def _build_document(path: Path, employees: list[dict[str, Any]], factory_no: str
             # Employee codes are identifiers, not amounts: never add a
             # thousands separator (e.g. 1006 must stay 1006).
             _employee_code(employee["employee_code"]),
-            str(employee["name"]).upper(),
+            normalize_employee_name(employee["name"]),
             employee["account_number"],
             f"{(_number(employee.get('salary')) or 0):,.0f}",
         ]
@@ -508,6 +882,85 @@ def _build_document(path: Path, employees: list[dict[str, Any]], factory_no: str
     document.save(path)
 
 
+def _build_bank_workbook(
+    path: Path,
+    employees: list[dict[str, Any]],
+    month: int | None,
+    year: int | None,
+) -> None:
+    """Build the bank Excel file matching the supplied six-column template."""
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "BangLuongNganHang"
+    worksheet.sheet_view.showGridLines = True
+
+    worksheet.merge_cells("A2:F2")
+    worksheet["A2"] = f" THIỆN TRÍ THÁNG {month}/{year}" if month and year else " BẢNG LƯƠNG NGÂN HÀNG"
+    worksheet["A2"].font = Font(name="Arial", size=16, bold=True)
+    worksheet["A2"].alignment = Alignment(horizontal="center", vertical="center")
+    worksheet.row_dimensions[2].height = 34.5
+
+    headers = ["STT", "Mã Nhân Viên", "HỌ TÊN", "SỐ TK", "SỐ TIỀN", "NỘI DUNG"]
+    for column, title in enumerate(headers, start=1):
+        cell = worksheet.cell(row=3, column=column, value=title)
+        cell.font = Font(name="Arial", size=10, bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.fill = PatternFill("solid", fgColor="FFFF00")
+
+    column_widths = {"A": 8, "B": 20, "C": 36, "D": 22, "E": 18, "F": 18}
+    for column, width in column_widths.items():
+        worksheet.column_dimensions[column].width = width
+    worksheet.row_dimensions[3].height = 30
+
+    thin = Side(style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for row in worksheet.iter_rows(min_row=3, max_row=3, min_col=1, max_col=6):
+        for cell in row:
+            cell.border = border
+
+    content = f"T{month}/{year}" if month and year else ""
+    total = 0
+    for index, employee in enumerate(employees, start=1):
+        row_number = index + 3
+        salary = _number(employee.get("salary")) or 0
+        total += salary
+        values = [
+            index,
+            _employee_code(employee.get("employee_code")),
+            normalize_employee_name(employee.get("name")),
+            normalize_account_number(employee.get("account_number")),
+            salary,
+            content,
+        ]
+        for column, value in enumerate(values, start=1):
+            cell = worksheet.cell(row=row_number, column=column, value=value)
+            cell.border = border
+            cell.font = Font(name="Arial", size=10)
+            cell.alignment = Alignment(
+                horizontal="left" if column == 3 else "right" if column == 5 else "center",
+                vertical="center",
+            )
+            if column in {2, 4}:
+                cell.number_format = "@"
+            elif column == 5:
+                cell.number_format = '#,##0'
+
+    total_row = len(employees) + 4
+    worksheet.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=4)
+    total_label = worksheet.cell(row=total_row, column=1, value="TỔNG")
+    total_label.font = Font(name="Arial", size=10, bold=True)
+    total_label.alignment = Alignment(horizontal="center", vertical="center")
+    total_amount = worksheet.cell(row=total_row, column=5, value=total)
+    total_amount.font = Font(name="Arial", size=10, bold=True)
+    total_amount.alignment = Alignment(horizontal="right", vertical="center")
+    total_amount.number_format = '#,##0'
+    for column in range(1, 7):
+        worksheet.cell(row=total_row, column=column).border = border
+
+    worksheet.freeze_panes = "A4"
+    workbook.save(path)
+
+
 def _display_employee_code(value: Any) -> str:
     code = str(value or "").strip()
     if code.isdigit():
@@ -525,6 +978,18 @@ def _find_result_row(ws, header_row: int, fields: dict[str, int]) -> int | None:
     code_col = fields["code"]
     salary_col = fields["final_salary"]
     work_days_col = fields.get("work_days")
+
+    # The generated Output 2 layout always places the employee summary five
+    # rows below its header. The row immediately above it is reserved for the
+    # bank account and may itself contain a numeric value that looks exactly
+    # like an employee code. Prefer the structural summary row so an account
+    # number can never become a payroll employee.
+    preferred_row = header_row + 5
+    if preferred_row <= ws.max_row:
+        preferred_code = _employee_code(ws.cell(preferred_row, code_col).value)
+        if preferred_code and preferred_code.isdigit():
+            return preferred_row
+
     code_rows: list[int] = []
     for row in range(header_row + 1, min(ws.max_row, header_row + 9) + 1):
         code = _employee_code(ws.cell(row, code_col).value)

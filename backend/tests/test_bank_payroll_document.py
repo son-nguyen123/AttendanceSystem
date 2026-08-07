@@ -32,7 +32,7 @@ class BankPayrollDocumentTests(unittest.TestCase):
         )
         self.assertEqual(
             [cell.text for cell in table.rows[1].cells],
-            ["1", "1006", "HỒ THỊ TÚ UYÊN", "5601884980", "3,330,000"],
+            ["1", "1006", "HO THI TU UYEN", "5601884980", "3,330,000"],
         )
         self.assertEqual(table.rows[-1].cells[0].text, "TỔNG")
         self.assertEqual(table.rows[-1].cells[4].text, "3,330,000")

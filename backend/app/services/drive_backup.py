@@ -47,7 +47,7 @@ def create_drive_backup(config: dict[str, Any], reason: str = "manual") -> dict[
     backup_dir = base_dir / "_System_Backup_Zip"
     backup_dir.mkdir(parents=True, exist_ok=True)
 
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S_%f")
     backup_path = backup_dir / f"SaoLuuHeThong_{timestamp}_{_safe_reason(reason)}.zip"
     manifest = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -133,6 +133,7 @@ def create_analysis_excel_copy(
     month: int,
     year: int,
     factory: str = "factory1",
+    replace_existing: bool = False,
 ) -> dict[str, Any]:
     factory = _normalize_factory(factory)
     base_dir = Path(str(config.get("drive_backup_dir") or default_backup_dir())).expanduser()
@@ -144,6 +145,17 @@ def create_analysis_excel_copy(
     safe_name = _safe_filename(original_filename or source_path.name)
     target = target_dir / f"Xuong{2 if factory == 'factory2' else 1}_{year}-{month:02d}_BanDangPhanTich_{timestamp}_{safe_name}"
     shutil.copy2(source_path, target)
+
+    replaced_paths: list[str] = []
+    if replace_existing:
+        for old_path in target_dir.iterdir():
+            if old_path == target or not old_path.is_file() or "_BanDangPhanTich_" not in old_path.name:
+                continue
+            try:
+                old_path.unlink()
+            except FileNotFoundError:
+                continue
+            replaced_paths.append(str(old_path))
 
     readme = target_dir / "README.txt"
     readme.write_text(
@@ -168,8 +180,44 @@ def create_analysis_excel_copy(
         "year": year,
         "factory": factory,
         "size_bytes": target.stat().st_size,
+        "replaced_paths": replaced_paths,
         "profile_sync": {"status": "skipped", "reason": "final_copy_only"},
     }
+
+
+def list_analysis_excel_copies(
+    config: dict[str, Any],
+    month: int,
+    year: int,
+    factory: str = "factory1",
+) -> list[dict[str, Any]]:
+    """List temporary machine copies for one month, newest first."""
+    factory = _normalize_factory(factory)
+    base_dir = Path(str(config.get("drive_backup_dir") or default_backup_dir())).expanduser()
+    target_dir = _excel_factory_dir(base_dir, factory) / _period_month_folder_name(month, year)
+    if not target_dir.exists():
+        return []
+    copies: list[dict[str, Any]] = []
+    try:
+        candidates = target_dir.iterdir()
+    except OSError:
+        return []
+    for path in candidates:
+        try:
+            if not path.is_file() or "_BanDangPhanTich_" not in path.name or path.suffix.lower() not in FINAL_COPY_EXTENSIONS:
+                continue
+            stat = path.stat()
+        except OSError:
+            continue
+        copies.append(
+            {
+                "filename": path.name,
+                "path": str(path),
+                "size_bytes": stat.st_size,
+                "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+            }
+        )
+    return sorted(copies, key=lambda item: item["modified_at"], reverse=True)
 
 
 def create_final_excel_copy(
@@ -180,6 +228,7 @@ def create_final_excel_copy(
     year: int,
     factory: str = "factory1",
     profile_sync_mode: str = "replace_manual",
+    replace_existing: bool = False,
 ) -> dict[str, Any]:
     factory = _normalize_factory(factory)
     base_dir = Path(str(config.get("drive_backup_dir") or default_backup_dir())).expanduser()
@@ -207,6 +256,17 @@ def create_final_excel_copy(
             overwrite_manual=True,
         )
 
+    replaced_paths: list[str] = []
+    if replace_existing:
+        for old_path in target_dir.iterdir():
+            if old_path == target or not old_path.is_file() or old_path.suffix.lower() not in FINAL_COPY_EXTENSIONS:
+                continue
+            try:
+                old_path.unlink()
+            except FileNotFoundError:
+                continue
+            replaced_paths.append(str(old_path))
+
     readme = target_dir / "README.txt"
     readme.write_text(
         "\n".join(
@@ -229,6 +289,7 @@ def create_final_excel_copy(
         "factory": factory,
         "size_bytes": target.stat().st_size,
         "profile_sync": profile_sync,
+        "replaced_paths": replaced_paths,
     }
 
 
@@ -257,15 +318,31 @@ def list_final_excel_copies(
         if year and item_year != year:
             continue
 
-        files = [
-            path
-            for path in final_dir.iterdir()
-            if path.is_file() and path.suffix.lower() in FINAL_COPY_EXTENSIONS
-        ]
+        try:
+            candidates = list(final_dir.iterdir())
+        except OSError:
+            # Google Drive can expose an online-only folder that exists in
+            # Explorer but is not readable by the local process.  A listing
+            # endpoint must remain usable while that folder is unavailable.
+            continue
+
+        files = []
+        for path in candidates:
+            try:
+                is_excel = path.is_file() and path.suffix.lower() in FINAL_COPY_EXTENSIONS
+            except OSError:
+                continue
+            if is_excel and _is_eligible_final_copy(path, item_factory):
+                files.append(path)
         if not files:
             continue
-        latest_file = max(files, key=lambda path: path.stat().st_mtime)
-        stat = latest_file.stat()
+        try:
+            latest_file = max(files, key=lambda path: path.stat().st_mtime)
+            stat = latest_file.stat()
+        except OSError:
+            # A synced file may disappear or become offline between the
+            # validation pass and the metadata read.
+            continue
         item = {
             "id": _encode_final_copy_id(latest_file),
             "month": item_month,
@@ -301,6 +378,70 @@ def resolve_final_excel_copy(config: dict[str, Any], copy_id: str) -> Path:
     return resolved
 
 
+def delete_final_excel_copy(config: dict[str, Any], copy_id: str) -> dict[str, Any]:
+    path = resolve_final_excel_copy(config, copy_id)
+    try:
+        path.unlink()
+    except FileNotFoundError as exc:
+        raise FileNotFoundError("Khong tim thay ban sao cuoi cung") from exc
+    return {
+        "status": "ok",
+        "copy_id": copy_id,
+        "path": str(path),
+    }
+
+
+def delete_drive_machine_files(
+    config: dict[str, Any],
+    month: int,
+    year: int,
+    factory: str = "factory1",
+) -> dict[str, Any]:
+    if month < 1 or month > 12 or year < 2000:
+        raise ValueError("Thang/nam khong hop le")
+
+    base_dir = Path(str(config.get("drive_backup_dir") or default_backup_dir())).expanduser()
+    excel_dir = (base_dir / "ExcelDaLuu").resolve()
+    period_name = _period_month_folder_name(month, year)
+    normalized_factory = _normalize_factory(factory)
+    candidates = [excel_dir / _factory_folder_name(normalized_factory) / period_name]
+    if normalized_factory == "factory1":
+        candidates.append(excel_dir / period_name)
+
+    deleted_paths: list[str] = []
+    errors: list[dict[str, str]] = []
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if excel_dir not in resolved.parents or resolved.name != period_name:
+            raise ValueError("Thu muc thang khong nam trong vung Drive cua AttendanceSystem")
+        if not resolved.exists():
+            continue
+        try:
+            for child in resolved.iterdir():
+                if child.name == "BanSaoCuoiCung":
+                    continue
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+                deleted_paths.append(str(child))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            errors.append({"path": str(resolved), "error": str(exc)})
+
+    return {
+        "status": "ok" if not errors else "partial",
+        "factory": normalized_factory,
+        "month": month,
+        "year": year,
+        "deleted_count": len(deleted_paths),
+        "deleted_paths": deleted_paths,
+        "error_count": len(errors),
+        "errors": errors,
+    }
+
+
 def delete_drive_period_files(
     config: dict[str, Any],
     month: int,
@@ -319,24 +460,32 @@ def delete_drive_period_files(
         candidates.append(excel_dir / period_name)
 
     deleted_paths: list[str] = []
+    errors: list[dict[str, str]] = []
     for candidate in candidates:
         resolved = candidate.resolve()
         if excel_dir not in resolved.parents or resolved.name != period_name:
             raise ValueError("Thu muc thang khong nam trong vung Drive cua AttendanceSystem")
-        if not resolved.exists():
+        try:
+            shutil.rmtree(resolved)
+        except FileNotFoundError:
             continue
-        if not resolved.is_dir():
-            raise ValueError("Duong dan thang tren Drive khong phai thu muc")
-        shutil.rmtree(resolved)
-        deleted_paths.append(str(resolved))
+        except OSError as exc:
+            # Keep local history deletion independent from a temporarily
+            # unavailable Google Drive folder.  The caller reports this as a
+            # partial deletion so the user can retry Drive later.
+            errors.append({"path": str(resolved), "error": str(exc)})
+        else:
+            deleted_paths.append(str(resolved))
 
     return {
-        "status": "ok",
+        "status": "ok" if not errors else "partial",
         "factory": normalized_factory,
         "month": month,
         "year": year,
         "deleted_count": len(deleted_paths),
         "deleted_paths": deleted_paths,
+        "error_count": len(errors),
+        "errors": errors,
     }
 
 
@@ -395,6 +544,18 @@ def _iter_final_copy_dirs(excel_dir: Path, factory: str | None):
     yield from excel_dir.glob("Xuong1/*/BanSaoCuoiCung")
     yield from excel_dir.glob("Xuong2/*/BanSaoCuoiCung")
     yield from excel_dir.glob("*/BanSaoCuoiCung")
+
+
+def _is_eligible_final_copy(path: Path, factory: str) -> bool:
+    """Filter legacy or malformed files before exposing them as final copies."""
+    try:
+        # Lazy import avoids a module cycle during application startup.
+        from app.services.workbook_guard import inspect_workbook_for_role
+
+        inspect_workbook_for_role(path, "final_copy", factory=factory)
+        return True
+    except Exception:
+        return False
 
 
 def _factory_from_final_dir(excel_dir: Path, final_dir: Path) -> str:

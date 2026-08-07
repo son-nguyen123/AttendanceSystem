@@ -35,15 +35,17 @@ class PayrollFormulaOutputTests(unittest.TestCase):
 
             expected_formulas = {
                 "AF9": "=SUM(A9:AE9)",
-                "AK9": "=AJ9/26",
-                "AL9": "=AJ9/208",
+                "AK9": '=IF(AJ9>0,AJ9/26,"")',
+                "AL9": '=IF(AJ9>0,AJ9/208,"")',
                 "AM9": "=SUM(A9:AE9)/8",
                 "AN9": "=SUM(A10:AE10)",
                 "AP9": "=IF(ISNUMBER(AG9),AG9*AF9,0)",
-                "AR9": "=AK9*AM9+(AN9*AL9*1.5)-IF(ISNUMBER(AQ9),AQ9,0)-AP9+IF(ISNUMBER(AO9),AO9,0)",
+                "AR9": '=IF(AK9>0,AK9,IF(AJ9>0,AJ9/26,0))*AM9+(AN9*AL9*1.5)-IF(ISNUMBER(AQ9),AQ9,0)-AP9+IF(ISNUMBER(AO9),AO9,0)',
             }
             for coordinate, formula in expected_formulas.items():
                 self.assertEqual(sheet[coordinate].value, formula)
+            self.assertNotIn("AL9", sheet["AK9"].value)
+            self.assertNotIn("AK9", sheet["AL9"].value)
 
             self.assertEqual(sheet["AH9"].value, "1006")
             self.assertEqual(sheet["AI9"].value, "Employee Name")

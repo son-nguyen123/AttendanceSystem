@@ -38,8 +38,29 @@ PRIVATE_LABELS = {
     "ung luong",
     "ung luong + phat",
     "phat nq",
-    "muc tien phat nq tren gio cong",
-    "muc tien phat nq tren gio cong (d)",
+    # The NQ penalty-rate column is part of the public Output 1 frame.  It is
+    # also present in Output 2, but by itself must not make an Output 1 look
+    # like a private payroll workbook.  Output 2 is still identified by its
+    # salary/bonus/advance fields below.
+}
+
+# A final copy is consumed as the current payroll source, so accepting any
+# workbook that merely contains a salary column is unsafe.  The old Output 2
+# placed the code immediately after "Tổng giờ công" and used a combined
+# "Ứng Lương + Phạt" column.  The reformed layout reserves the penalty-rate
+# column first and has the code/name/salary fields at fixed offsets.
+REFORMED_OUTPUT2_HEADERS = {
+    1: "muc tien phat nq tren gio cong (d)",
+    2: "ma",
+    3: "ten nhan vien / ghi chu",
+    4: "muc luong",
+    5: "luong 1 ngay cong",
+    6: "luong 1 gio cong",
+    7: "so ngay di lam",
+    8: "gio lam them",
+    9: "thuong",
+    10: "phat nq",
+    11: "ung luong",
 }
 
 
@@ -55,6 +76,7 @@ class WorkbookProfile:
     has_private_payroll: bool
     structural_errors: tuple[str, ...]
     ignored_trailing_style_rows: int = 0
+    has_reformed_output2_layout: bool = False
 
     @property
     def period_label(self) -> str:
@@ -133,6 +155,7 @@ def profile_workbook(path: Path, factory: str = "factory1") -> WorkbookProfile:
 
             block_codes = tuple(str(block.employee_code).strip() for block in blocks)
             summary_codes = tuple(summaries.keys())
+            has_reformed_output2_layout = _has_reformed_output2_layout(worksheet, summaries)
             if summaries and not has_private and set(block_codes) != set(summary_codes):
                 missing_summary = sorted(set(block_codes) - set(summary_codes))
                 extra_summary = sorted(set(summary_codes) - set(block_codes))
@@ -193,6 +216,7 @@ def profile_workbook(path: Path, factory: str = "factory1") -> WorkbookProfile:
                 has_private_payroll=has_private,
                 structural_errors=tuple(dict.fromkeys(errors)),
                 ignored_trailing_style_rows=ignored_rows,
+                has_reformed_output2_layout=has_reformed_output2_layout,
             )
         finally:
             workbook.close()
@@ -247,6 +271,13 @@ def validate_profile_for_role(profile: WorkbookProfile, role: WorkbookRole) -> N
         raise ValueError(
             f"File không đúng loại cho mục này. Cần {descriptions[role]}, "
             f"nhưng hệ thống nhận diện là {_kind_label(profile.detected_kind)}."
+        )
+
+    if role == "final_copy" and not profile.has_reformed_output2_layout:
+        raise ValueError(
+            "Bản sao cuối cùng chỉ nhận file Output 2 theo khung mới: "
+            "có cột phạt NQ/giờ, Mã ở sau cột này và tách riêng Phạt NQ/Ứng Lương. "
+            "File đang chọn là khung cũ hoặc không đủ cột khung mới."
         )
 
 
@@ -364,6 +395,29 @@ def _summary_header_labels(worksheet, summaries: dict) -> set[str]:
         for col in range(block.total_col, block.data_end_col + 1):
             labels.add(_normalize_label(worksheet.cell(block.header_row, col).value))
     return labels
+
+
+def _has_reformed_output2_layout(worksheet, summaries: dict) -> bool:
+    """Return whether every payroll block uses the current Output 2 frame."""
+    if not summaries:
+        return False
+
+    for summary in summaries.values():
+        # The new frame is relative to the "Tổng giờ công" column, but the
+        # first block must still expose all of the fields through final salary.
+        if summary.code_col != summary.total_col + 2:
+            return False
+        if summary.data_end_col < summary.total_col + 12:
+            return False
+        for offset, expected in REFORMED_OUTPUT2_HEADERS.items():
+            actual = _normalize_label(worksheet.cell(summary.header_row, summary.total_col + offset).value)
+            if actual != expected:
+                return False
+        final_header = _normalize_label(worksheet.cell(summary.header_row, summary.total_col + 12).value)
+        if not final_header.startswith("luong thang"):
+            return False
+
+    return True
 
 
 def _all_normalized_labels(worksheet) -> set[str]:

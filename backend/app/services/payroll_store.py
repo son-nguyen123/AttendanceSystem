@@ -1,5 +1,6 @@
 import json
 import os
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -30,6 +31,19 @@ class PayrollEntry(BaseModel):
 
 def normalize_employee_code(employee_code: object) -> str:
     return str(employee_code or "").strip()
+
+
+def normalize_employee_name(name: object) -> str:
+    """Return the canonical employee name used by every output.
+
+    Names are identifiers for people in the payroll screens, so spacing and
+    casing must not create visually different duplicates.  Vietnamese
+    diacritics (including Đ/đ) are removed and the result is upper-cased.
+    """
+    text = str(name or "").replace("Đ", "D").replace("đ", "d")
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(char for char in text if unicodedata.category(char) != "Mn")
+    return " ".join(text.split()).upper()
 
 
 def normalize_factory(factory: object) -> str:
@@ -66,7 +80,7 @@ def get_payroll_entry(employee_code: str, factory: str = "factory1") -> PayrollE
     raw_entry = load_payroll_data(factory).get(normalize_employee_code(employee_code), {})
     if not isinstance(raw_entry, dict):
         raw_entry = {}
-    return PayrollEntry(**raw_entry)
+    return PayrollEntry(**{**raw_entry, "name": normalize_employee_name(raw_entry.get("name"))})
 
 
 def save_payroll_entry(employee_code: str, entry: PayrollEntry, factory: str = "factory1") -> None:
@@ -93,7 +107,13 @@ def save_payroll_entry(employee_code: str, entry: PayrollEntry, factory: str = "
 
 def list_payroll_employees(factory: str = "factory1") -> list[dict]:
     return [
-        _entry_to_employee(code, PayrollEntry(**(entry if isinstance(entry, dict) else {})))
+        _entry_to_employee(
+            code,
+            PayrollEntry(**{
+                **(entry if isinstance(entry, dict) else {}),
+                "name": normalize_employee_name(entry.get("name") if isinstance(entry, dict) else ""),
+            }),
+        )
         for code, entry in sorted(load_payroll_data(factory).items(), key=lambda item: _employee_sort_key(item[0]))
     ]
 
@@ -110,7 +130,7 @@ def merge_missing_payroll_entries(defaults_by_code: dict[str, dict], factory: st
             continue
 
         entry = PayrollEntry(
-            name=str(defaults.get("name") or "").strip(),
+            name=normalize_employee_name(defaults.get("name")),
             note=str(defaults.get("note") or "").strip(),
         )
         data[code] = entry.model_dump()
@@ -168,6 +188,8 @@ def merge_payroll_profile_updates(
             value = raw_updates.get(field)
             if value in (None, ""):
                 continue
+            if field == "name":
+                value = normalize_employee_name(value)
             if field in {"monthly_salary", "daily_salary", "hourly_salary", "bonus"}:
                 value = _number_or_none(value)
                 if value is None:
@@ -364,7 +386,7 @@ def _entry_to_employee(employee_code: str, entry: PayrollEntry) -> dict:
     hourly_salary = calculate_hourly_salary(entry)
     return {
         "employee_code": employee_code,
-        "name": entry.name,
+        "name": normalize_employee_name(entry.name),
         "start_work_note": entry.start_work_note,
         "note": entry.note,
         "header_row": None,
@@ -385,6 +407,7 @@ def _entry_to_employee(employee_code: str, entry: PayrollEntry) -> dict:
 
 def normalize_payroll_entry(entry: PayrollEntry) -> PayrollEntry:
     data = entry.model_dump()
+    data["name"] = normalize_employee_name(data.get("name"))
     # Monthly salary is the source of truth for the new Output 2 layout.
     # Daily/hourly values are derived from it; legacy hourly/daily-only rows
     # are still accepted and promoted to a monthly value.

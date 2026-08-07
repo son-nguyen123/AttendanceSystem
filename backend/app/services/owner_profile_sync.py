@@ -6,7 +6,6 @@ from typing import Any
 
 from openpyxl import load_workbook
 
-from app.services.period_detector import detect_period_from_workbook
 from app.services.payroll_store import merge_payroll_profile_updates, normalize_employee_code
 
 
@@ -14,7 +13,7 @@ SUMMARY_MIN_COL = 32
 
 
 def sync_latest_final_copy_profile(source_path: Path | None, factory: str) -> dict[str, Any]:
-    """Refresh from the newest final copy without replacing manual entries."""
+    """Refresh reusable profiles from the newest final copy."""
     try:
         # Imported lazily to avoid a cloud/profile import cycle at startup.
         from app.services.cloud_sync import list_drive_final_copies
@@ -23,24 +22,12 @@ def sync_latest_final_copy_profile(source_path: Path | None, factory: str) -> di
         if not copies:
             return _empty_result("", "no_final_copy")
 
-        if source_path is None:
-            # The employee registry has no current attendance workbook. In
-            # that view the newest saved final copy is the correct baseline.
-            current_key = (0, 0)
-        else:
-            period = detect_period_from_workbook(source_path)
-            current_key = (int(period.get("year") or 0), int(period.get("month") or 0))
-        eligible = [
-            item
-            for item in copies
-            if current_key == (0, 0)
-            or (int(item.get("year") or 0), int(item.get("month") or 0)) <= current_key
-        ]
-        if not eligible:
-            return _empty_result("", "no_eligible_final_copy")
-
+        # One rule applies everywhere: the newest final copy is authoritative
+        # for reusable profile fields. Older copies remain archived, but they
+        # must never re-enter the live employee registry just because the
+        # current attendance workbook belongs to an earlier month.
         latest = max(
-            eligible,
+            copies,
             key=lambda item: (
                 int(item.get("year") or 0),
                 int(item.get("month") or 0),
@@ -57,7 +44,7 @@ def sync_latest_final_copy_profile(source_path: Path | None, factory: str) -> di
             month=int(latest.get("month") or 0) or None,
             year=int(latest.get("year") or 0) or None,
             source_kind="final_copy",
-            overwrite_manual=False,
+            overwrite_manual=True,
         )
     except Exception as exc:
         return {**_empty_result("", "final_copy_sync_failed"), "error": str(exc)}

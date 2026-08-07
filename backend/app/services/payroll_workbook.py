@@ -8,8 +8,8 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from app.services.block_detector import detect_employee_blocks
-from app.services.payroll_store import PayrollEntry, calculate_daily_salary, calculate_hourly_salary, calculate_monthly_salary, get_payroll_entry
-from app.services.workbook_processor import _format_attendance_time_row, _format_title_area, export_processed_workbook
+from app.services.payroll_store import PayrollEntry, calculate_daily_salary, calculate_hourly_salary, calculate_monthly_salary, get_payroll_entry, normalize_employee_name
+from app.services.workbook_processor import _center_attendance_numbers, _format_attendance_punch_row, _format_attendance_time_row, _format_title_area, export_processed_workbook
 
 
 PAYROLL_START_COL = 32
@@ -53,6 +53,7 @@ def export_payroll_workbook(
     include_saved_data: bool = True,
     profile_codes: set[str] | None = None,
     factory: str = "factory1",
+    source_payroll_values: dict[str, dict] | None = None,
 ) -> Path:
     with NamedTemporaryFile(suffix=".xlsx", delete=False) as temp_file:
         temp_output1 = Path(temp_file.name)
@@ -65,14 +66,18 @@ def export_payroll_workbook(
 
         for block in blocks:
             _format_attendance_time_row(ws, block)
+            _format_attendance_punch_row(ws, block)
+            _center_attendance_numbers(ws, block)
+            source_values = (source_payroll_values or {}).get(block.employee_code)
             preview = _build_employee_preview(
                 ws,
                 block,
                 include_saved_data=include_saved_data,
                 profile_codes=profile_codes,
                 factory=factory,
+                source_values=source_values,
             )
-            _write_payroll_block(ws, block, preview)
+            _write_payroll_block(ws, block, preview, source_values=source_values)
 
         _write_monthly_grand_total(ws, blocks)
         _set_payroll_column_widths(ws)
@@ -99,6 +104,8 @@ def apply_payroll_to_workbook(
 
     for block in blocks:
         _format_attendance_time_row(ws, block)
+        _format_attendance_punch_row(ws, block)
+        _center_attendance_numbers(ws, block)
         preview = _build_employee_preview(ws, block, profile_codes=profile_codes, factory=factory)
         _write_payroll_block(ws, block, preview)
 
@@ -159,54 +166,75 @@ def _build_employee_preview(
     include_saved_data: bool = True,
     profile_codes: set[str] | None = None,
     factory: str = "factory1",
+    source_values: dict | None = None,
 ) -> dict:
     entry = get_payroll_entry(block.employee_code, factory)
     if profile_codes is not None and block.employee_code not in profile_codes:
         entry = PayrollEntry()
-    total_hours = _sum_work_hours(ws, block.result_row)
-    monthly_salary = calculate_monthly_salary(entry) if include_saved_data else None
-    daily_salary = calculate_daily_salary(entry) if include_saved_data else 0
-    hourly_salary = calculate_hourly_salary(entry) if include_saved_data else 0
-    work_days = total_hours / 8
-    overtime_hours = _sum_work_hours(ws, block.result_row + 1)
-    bonus = entry.bonus if include_saved_data else None
-    # Penalty/advance are period-specific and must be entered deliberately in
-    # the new Output 2 columns; they never carry over from the profile store.
-    advance_or_penalty = None
-    nq_penalty = 0
+    source_values = source_values or {}
+    total_hours = _prefer_source_number(source_values, "total_hours", _sum_work_hours(ws, block.result_row)) or 0
+    monthly_salary = _prefer_source_number(source_values, "monthly_salary", calculate_monthly_salary(entry) if include_saved_data else None)
+    daily_salary = _prefer_source_number(source_values, "daily_salary", calculate_daily_salary(entry) if include_saved_data else 0)
+    hourly_salary = _prefer_source_number(source_values, "hourly_salary", calculate_hourly_salary(entry) if include_saved_data else 0)
+    work_days = _prefer_source_number(source_values, "work_days", total_hours / 8)
+    overtime_hours = _prefer_source_number(source_values, "overtime_hours", _sum_work_hours(ws, block.result_row + 1)) or 0
+    bonus = _prefer_source_number(source_values, "bonus", entry.bonus if include_saved_data else None)
+    # A frame conversion keeps period-specific values from that exact source
+    # workbook. Normal monthly exports still leave them empty because no
+    # source_payroll_values are supplied.
+    advance_or_penalty = _prefer_source_number(source_values, "advance_or_penalty", None)
+    nq_penalty = _prefer_source_number(source_values, "nq_penalty", 0)
     month_salary = (
-        daily_salary * work_days
-        + overtime_hours * hourly_salary * 1.5
+        (daily_salary or 0) * (work_days or 0)
+        + overtime_hours * (hourly_salary or 0) * 1.5
         + (bonus or 0)
         - nq_penalty
         - (advance_or_penalty or 0)
     )
 
+    source_final_salary = _prefer_source_number(source_values, "final_salary", None)
+
+    def source_number_or_rounded(key: str, value: int | float | None) -> int | float | None:
+        if key in source_values and value is not None:
+            return value
+        return _round_optional_number(value)
+
+    bank_account = (
+        str(source_values.get("bank_account") or "").strip()
+        if "bank_account" in source_values
+        else _saved_bank_account(factory, block.employee_code) if include_saved_data else ""
+    )
+
     return {
         "employee_code": block.employee_code,
-        "name": entry.name if include_saved_data else "",
-        "bank_account": _saved_bank_account(factory, block.employee_code) if include_saved_data else "",
-        "start_work_note": entry.start_work_note if include_saved_data else "",
-        "note": entry.note if include_saved_data else "",
+        "name": normalize_employee_name(_prefer_source_text(source_values, "name", entry.name if include_saved_data else "")),
+        "bank_account": bank_account,
+        "start_work_note": _prefer_source_text(source_values, "start_work_note", entry.start_work_note if include_saved_data else ""),
+        "note": _prefer_source_text(source_values, "note", entry.note if include_saved_data else ""),
         "header_row": block.header_row,
         "result_row": block.result_row,
         "note_row": block.header_row + 7,
-        "total_hours": _round_number(total_hours),
-        "monthly_salary": _round_optional_number(monthly_salary),
+        "total_hours": source_number_or_rounded("total_hours", total_hours),
+        "monthly_salary": source_number_or_rounded("monthly_salary", monthly_salary),
         "daily_salary_input": entry.daily_salary if include_saved_data else None,
-        "daily_salary": _round_number(daily_salary),
-        "hourly_salary": _round_number(hourly_salary),
+        "daily_salary": source_number_or_rounded("daily_salary", daily_salary),
+        "hourly_salary": source_number_or_rounded("hourly_salary", hourly_salary),
         "standard_work_days": entry.standard_work_days if include_saved_data else 26,
-        "work_days": _round_number(work_days),
-        "overtime_hours": _round_number(overtime_hours),
+        "work_days": source_number_or_rounded("work_days", work_days),
+        "overtime_hours": source_number_or_rounded("overtime_hours", overtime_hours),
         "bonus": bonus,
-        "nq_penalty": _round_number(nq_penalty),
+        "penalty_rate": _prefer_source_number(source_values, "penalty_rate", None),
+        "nq_penalty": source_number_or_rounded("nq_penalty", nq_penalty),
         "advance_or_penalty": advance_or_penalty,
-        "final_salary": _round_number(month_salary),
+        "final_salary": (
+            source_final_salary
+            if source_final_salary is not None
+            else _round_number(month_salary)
+        ),
     }
 
 
-def _write_payroll_block(ws, block, preview: dict) -> None:
+def _write_payroll_block(ws, block, preview: dict, source_values: dict | None = None) -> None:
     h = block.header_row
     payroll_header_row = h + 1
     result_row = block.result_row
@@ -293,28 +321,64 @@ def _write_payroll_block(ws, block, preview: dict) -> None:
     nq_penalty_letter = get_column_letter(nq_penalty_col)
     advance_letter = get_column_letter(advance_col)
 
+    source_values = source_values or {}
+
+    def has_source_value(key: str) -> bool:
+        return key in source_values and source_values[key] not in (None, "")
+
     values = {
-        total_col: f"=SUM({first_day}{result_row}:{last_day}{result_row})",
-        penalty_rate_col: None,
+        # A legacy conversion is a historical snapshot. Preserve the exact
+        # total from that workbook when it exists; normal monthly exports keep
+        # the live formula driven by the attendance row.
+        total_col: (
+            preview["total_hours"]
+            if has_source_value("total_hours")
+            else f"=SUM({first_day}{result_row}:{last_day}{result_row})"
+        ),
+        penalty_rate_col: preview.get("penalty_rate"),
         code_col: block.employee_code,
         name_col: preview["name"],
         salary_col: preview["monthly_salary"],
-        daily_salary_col: f"={salary_letter}{result_row}/26",
-        hourly_salary_col: f"={salary_letter}{result_row}/208",
-        work_days_col: f"=SUM({first_day}{result_row}:{last_day}{result_row})/8",
-        overtime_col: f"=SUM({first_day}{result_row + 1}:{last_day}{result_row + 1})",
+        daily_salary_col: (
+            # The salary column is the input for the new frame.  Even when a
+            # legacy workbook supplied an old daily-rate number, keep this
+            # cell formula-driven so the converted frame follows the same
+            # rules as Xưởng 1 when the salary is edited later.
+            f'=IF({salary_letter}{result_row}>0,{salary_letter}{result_row}/26,"")'
+        ),
+        hourly_salary_col: (
+            f'=IF({salary_letter}{result_row}>0,{salary_letter}{result_row}/208,"")'
+        ),
+        work_days_col: (
+            # Work days are derived from the attendance row, not copied as a
+            # stale number from the old vertical summary.
+            f"=SUM({first_day}{result_row}:{last_day}{result_row})/8"
+        ),
+        overtime_col: (
+            preview["overtime_hours"]
+            if has_source_value("overtime_hours")
+            else f"=SUM({first_day}{result_row + 1}:{last_day}{result_row + 1})"
+        ),
         bonus_col: preview["bonus"],
         nq_penalty_col: (
-            f'=IF(ISNUMBER({penalty_rate_letter}{result_row}),'
-            f"{penalty_rate_letter}{result_row}*{total_letter}{result_row},0)"
+            preview["nq_penalty"]
+            if has_source_value("nq_penalty")
+            else f'=IF(ISNUMBER({penalty_rate_letter}{result_row}),'
+                 f"{penalty_rate_letter}{result_row}*{total_letter}{result_row},0)"
         ),
         advance_col: preview["advance_or_penalty"],
         final_salary_col: (
-            f"={daily_salary_letter}{result_row}*{work_days_letter}{result_row}"
-            f"+({overtime_letter}{result_row}*{hourly_salary_letter}{result_row}*1.5)"
-            f"-IF(ISNUMBER({advance_letter}{result_row}),{advance_letter}{result_row},0)"
-            f"-{nq_penalty_letter}{result_row}"
-            f"+IF(ISNUMBER({bonus_letter}{result_row}),{bonus_letter}{result_row},0)"
+            preview["final_salary"]
+            if has_source_value("final_salary")
+            else (
+                f'=IF({daily_salary_letter}{result_row}>0,{daily_salary_letter}{result_row},'
+                f'IF({salary_letter}{result_row}>0,{salary_letter}{result_row}/26,0))'
+                f"*{work_days_letter}{result_row}"
+                f"+({overtime_letter}{result_row}*{hourly_salary_letter}{result_row}*1.5)"
+                f"-IF(ISNUMBER({advance_letter}{result_row}),{advance_letter}{result_row},0)"
+                f"-{nq_penalty_letter}{result_row}"
+                f"+IF(ISNUMBER({bonus_letter}{result_row}),{bonus_letter}{result_row},0)"
+            )
         ),
     }
 
@@ -395,21 +459,52 @@ def _sum_work_hours(ws, row: int) -> float:
 
 
 def _restore_number(value: object) -> int | float | None:
+    number = _parse_number(value)
+    return _round_number(number) if number is not None else None
+
+
+def _parse_number(value: object) -> int | float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return _round_number(float(value))
+        return value
 
     text = str(value or "").strip()
     if not text or text == "?":
         return None
 
-    normalized = text.replace(" ", "").replace(",", ".")
+    normalized = text.replace(" ", "")
+    if normalized.count(",") > 1 and "." not in normalized:
+        normalized = normalized.replace(",", "")
+    elif normalized.count(".") > 1 and "," not in normalized:
+        normalized = normalized.replace(".", "")
+    elif "," in normalized and "." in normalized:
+        # Vietnamese files commonly use dots for thousands and comma for the
+        # decimal separator. Keep the last separator as the decimal marker.
+        if normalized.rfind(",") > normalized.rfind("."):
+            normalized = normalized.replace(".", "").replace(",", ".")
+        else:
+            normalized = normalized.replace(",", "")
+    else:
+        normalized = normalized.replace(",", ".")
     try:
         number = float(normalized)
     except ValueError:
         return None
-    return _round_number(number)
+    return number
+
+
+def _prefer_source_number(source: dict, key: str, fallback: int | float | None) -> int | float | None:
+    if key not in source:
+        return fallback
+    value = _parse_number(source.get(key))
+    return fallback if value is None else value
+
+
+def _prefer_source_text(source: dict, key: str, fallback: str) -> str:
+    if key in source:
+        return str(source.get(key) or "").strip()
+    return fallback
 
 
 def _round_optional_number(value: float | None) -> int | float | None:

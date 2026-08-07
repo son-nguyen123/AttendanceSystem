@@ -17,6 +17,8 @@ from openpyxl.formula.translate import Translator
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from app.services.payroll_store import normalize_employee_name
+
 
 SUMMARY_TOTAL_LABELS = {"tong gio cong", "tong giờ công"}
 SUMMARY_CODE_LABELS = {"ma", "mã"}
@@ -238,9 +240,9 @@ def map_owner_data_to_current_workbook(
         # Bank accounts are deliberately managed by the Bank screen/Word
         # import. Never carry an account number from the owner mapping file;
         # Output 2 receives only the factory-specific bank registry below.
-        _clear_mapped_bank_account_cells(current_ws, list(current_blocks.values()))
+        _clear_mapped_bank_account_cells(current_ws, list(current_blocks.values()), mode)
         if mode == "output2":
-            _apply_saved_bank_accounts(current_ws, list(current_blocks.values()), factory)
+            _apply_saved_bank_accounts(current_ws, list(current_blocks.values()), factory, mode)
 
         _enable_formula_recalculation(current_wb)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -707,12 +709,12 @@ def _write_reformed_owner_area(
     result_row = target.result_row
     note_row = target.header_row + SUMMARY_ROWS - 1
 
-    current_name = _first_non_empty_text(
+    current_name = normalize_employee_name(_first_non_empty_text(
         target_ws,
         result_row,
         target.code_col + 1,
         max(target.code_col + 1, target.data_end_col),
-    )
+    ))
     source_name = None
     source_start_work_note = None
     source_salary = None
@@ -720,19 +722,19 @@ def _write_reformed_owner_area(
     source_note = None
     needs_deduction_review = False
     if isinstance(source, OwnerRecord):
-        source_name = source.name
+        source_name = normalize_employee_name(source.name)
         source_start_work_note = source.start_work_note
         source_salary = source.salary
         source_bonus = source.bonus
         source_note = source.note
         needs_deduction_review = source.has_previous_deduction
     elif source is not None:
-        source_name = _first_non_empty_text(
+        source_name = normalize_employee_name(_first_non_empty_text(
             source_values_ws,
             source.result_row,
             source.code_col + 1,
             max(source.code_col + 1, source.data_end_col),
-        )
+        ))
         source_salary = _fixed_field_value(
             source_ws,
             source_values_ws,
@@ -813,10 +815,16 @@ def _write_reformed_owner_area(
     target_ws.cell(result_row, total_col).value = f"=SUM({first_day}{result_row}:{last_day}{result_row})"
     target_ws.cell(result_row, penalty_rate_col).value = None
     target_ws.cell(result_row, code_col).value = target.code
-    target_ws.cell(result_row, name_col).value = source_name or current_name
+    target_ws.cell(result_row, name_col).value = normalize_employee_name(source_name or current_name)
     target_ws.cell(result_row, salary_col).value = source_salary
-    target_ws.cell(result_row, daily_salary_col).value = f"={salary_letter}{result_row}/26"
-    target_ws.cell(result_row, hourly_salary_col).value = f"={salary_letter}{result_row}/208"
+    target_ws.cell(result_row, daily_salary_col).value = (
+        f'=IF({salary_letter}{result_row}>0,{salary_letter}{result_row}/26,'
+        f'IF({hourly_salary_letter}{result_row}>0,{hourly_salary_letter}{result_row}*8,""))'
+    )
+    target_ws.cell(result_row, hourly_salary_col).value = (
+        f'=IF({salary_letter}{result_row}>0,{salary_letter}{result_row}/208,'
+        f'IF({daily_salary_letter}{result_row}>0,{daily_salary_letter}{result_row}/8,""))'
+    )
     target_ws.cell(result_row, work_days_col).value = (
         f"=SUM({first_day}{result_row}:{last_day}{result_row})/8"
     )
@@ -839,7 +847,10 @@ def _write_reformed_owner_area(
         advance_cell.fill = PatternFill("solid", fgColor=GREEN)
         advance_cell.font = Font(name=FONT_NAME, bold=True, size=12, color=RED)
     target_ws.cell(result_row, final_salary_col).value = (
-        f"={daily_salary_letter}{result_row}*{work_days_letter}{result_row}"
+        f'=IF({daily_salary_letter}{result_row}>0,{daily_salary_letter}{result_row},'
+        f'IF({salary_letter}{result_row}>0,{salary_letter}{result_row}/26,'
+        f'IF({hourly_salary_letter}{result_row}>0,{hourly_salary_letter}{result_row}*8,0)))'
+        f"*{work_days_letter}{result_row}"
         f"+({overtime_letter}{result_row}*{hourly_salary_letter}{result_row}*1.5)"
         f"-IF(ISNUMBER({advance_letter}{result_row}),{advance_letter}{result_row},0)"
         f"-{nq_penalty_letter}{result_row}"
@@ -894,19 +905,40 @@ def _write_reformed_owner_area(
     return needs_deduction_review
 
 
-def _clear_mapped_bank_account_cells(ws, blocks: list[SummaryBlock]) -> None:
+def _mapped_bank_account_col(block: SummaryBlock, mode: MappingMode) -> int:
+    """Return the bank-account column for the workbook layout being written.
+
+    Output 1 keeps the current attendance layout, where the account cell is
+    immediately to the right of the code column. Output 2 inserts the NQ-rate
+    column before the code, so its account cell is three columns after the
+    total-hours column. Using ``block.code_col + 1`` for both layouts writes
+    the account into Output 2's actual code column.
+    """
+    return block.total_col + 3 if mode == "output2" else block.code_col + 1
+
+
+def _clear_mapped_bank_account_cells(
+    ws,
+    blocks: list[SummaryBlock],
+    mode: MappingMode,
+) -> None:
     for block in blocks:
-        cell = ws.cell(block.result_row - 1, block.code_col + 1)
+        cell = ws.cell(block.result_row - 1, _mapped_bank_account_col(block, mode))
         cell.value = None
         cell.number_format = "@"
         cell.alignment = Alignment(horizontal="left", vertical="center")
 
 
-def _apply_saved_bank_accounts(ws, blocks: list[SummaryBlock], factory: str) -> None:
+def _apply_saved_bank_accounts(
+    ws,
+    blocks: list[SummaryBlock],
+    factory: str,
+    mode: MappingMode,
+) -> None:
     from app.services.bank_account_store import get_saved_account_number
 
     for block in blocks:
-        cell = ws.cell(block.result_row - 1, block.code_col + 1)
+        cell = ws.cell(block.result_row - 1, _mapped_bank_account_col(block, mode))
         cell.value = get_saved_account_number(factory, block.code)
         cell.number_format = "@"
         cell.alignment = Alignment(horizontal="left", vertical="center")

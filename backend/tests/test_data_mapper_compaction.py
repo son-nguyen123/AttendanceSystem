@@ -161,7 +161,7 @@ class DataMapperNumberFormatTests(unittest.TestCase):
             try:
                 sheet = mapped.active
                 self.assertEqual(summary["matched_codes"], ["1006"])
-                self.assertEqual(sheet["AI9"].value, "Nguyễn Văn A")
+                self.assertEqual(sheet["AI9"].value, "NGUYEN VAN A")
                 self.assertEqual(sheet["AJ9"].value, 3_850_000)
                 self.assertEqual(sheet["AO9"].value, 200_000)
                 self.assertEqual(sheet["AQ9"].value, "?")

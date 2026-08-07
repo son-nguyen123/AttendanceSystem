@@ -4,6 +4,7 @@ from datetime import date, datetime
 from calendar import monthrange
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import Any
 import re
 import unicodedata
 
@@ -14,7 +15,7 @@ from openpyxl.utils import get_column_letter
 from app.models.attendance import DayComputation
 from app.services.attendance_calculator import calculate_day
 from app.services.payroll_workbook import export_payroll_workbook
-from app.services.payroll_store import PayrollEntry, calculate_daily_salary, calculate_hourly_salary, calculate_monthly_salary, get_payroll_entry
+from app.services.payroll_store import PayrollEntry, calculate_daily_salary, calculate_hourly_salary, calculate_monthly_salary, get_payroll_entry, normalize_employee_name
 from app.services.punch_parser import parse_punches
 from app.services.workbook_processor import export_processed_workbook
 
@@ -27,6 +28,8 @@ FONT_NAME = "Arial"
 MONEY_FORMAT = "#,##0"
 INTEGER_NUMBER_FORMAT = "#,##0"
 NUMBER_FORMAT = "#,##0.##"
+MAX_FACTORY2_COLUMNS = 200
+MAX_TRAILING_EMPTY_ROWS = 200
 
 
 @dataclass
@@ -154,6 +157,7 @@ def export_factory2_output2(
     include_saved_data: bool = True,
     profile_codes: set[str] | None = None,
     factory: str = "factory2",
+    carry_source_payroll_data: bool = False,
 ) -> Path:
     with NamedTemporaryFile(suffix=".xlsx", delete=False) as temp_file:
         temp_source = Path(temp_file.name)
@@ -167,6 +171,7 @@ def export_factory2_output2(
             include_saved_data=include_saved_data,
             profile_codes=profile_codes,
             factory=factory,
+            source_payroll_values=_read_legacy_payroll_values(source_path) if carry_source_payroll_data else None,
         )
     finally:
         temp_source.unlink(missing_ok=True)
@@ -174,6 +179,192 @@ def export_factory2_output2(
 
 def write_factory2_standard_source(source_path: Path, output_path: Path) -> Path:
     return _write_factory1_shaped_source(source_path, output_path)
+
+
+def _read_legacy_payroll_values(source_path: Path) -> dict[str, dict[str, Any]]:
+    """Read same-period owner values from any recognizable table in the source.
+
+    Raw vertical attendance files normally have no payroll fields. Older
+    owner-edited forms may contain a separate or repeated summary table; those
+    values must survive a frame conversion because the converted Output 2 is
+    intended to become the final copy for the same month.
+    """
+    formula_wb = load_workbook(source_path, data_only=False)
+    values_wb = load_workbook(source_path, data_only=True)
+    try:
+        result: dict[str, dict[str, Any]] = {}
+        for source_ws in formula_wb.worksheets:
+            values_ws = values_wb[source_ws.title]
+            for header_row, fields in _legacy_payroll_sections(source_ws):
+                extras = _legacy_adjacent_summary_values(values_ws, header_row)
+                data_row = _legacy_payroll_data_row(values_ws, header_row, fields)
+                if data_row is None:
+                    continue
+
+                code = _clean_code(values_ws.cell(data_row, fields["code"]).value)
+                if not code:
+                    continue
+
+                item = result.setdefault(code, {})
+                item.update({key: value for key, value in extras.items() if value not in (None, "")})
+                for key, col in fields.items():
+                    if key == "code":
+                        continue
+                    value = values_ws.cell(data_row, col).value
+                    if value in (None, ""):
+                        value = source_ws.cell(data_row, col).value
+                    if value not in (None, ""):
+                        item[key] = value
+        return result
+    finally:
+        formula_wb.close()
+        values_wb.close()
+
+
+def _legacy_payroll_header_fields(ws, row: int) -> dict[str, int]:
+    fields: dict[str, int] = {}
+    for col in range(1, min(ws.max_column, MAX_FACTORY2_COLUMNS) + 1):
+        label = _plain_text(ws.cell(row, col).value)
+        if not label:
+            continue
+        if label in {"ma", "ma nv", "ma nhan vien"} and "code" not in fields:
+            fields["code"] = col
+        elif label in {"ten", "ten nv", "ten nhan vien", "ho va ten", "ten nhan vien ghi chu"} and "name" not in fields:
+            fields["name"] = col
+        elif label.startswith("muc tien phat nq") and "penalty_rate" not in fields:
+            fields["penalty_rate"] = col
+        else:
+            payroll_field = _legacy_payroll_field(label)
+            if payroll_field and payroll_field not in fields:
+                fields[payroll_field] = col
+    return fields
+
+
+def _legacy_payroll_field(label: str) -> str | None:
+    """Map labels from the old per-employee summary blocks to Output 2 fields."""
+    if label in {"muc luong", "luong thang muc luong"}:
+        return "monthly_salary"
+    if label.startswith("luong 1 ngay"):
+        return "daily_salary"
+    if label.startswith("luong 1 gio"):
+        return "hourly_salary"
+    if label.startswith("so ngay di lam") or label.startswith("so ngay i lam") or label == "ngay cong":
+        return "work_days"
+    if label.startswith("tong h lam") or label.startswith("tong gio lam") or label.startswith("tong gio cong"):
+        return "total_hours"
+    if label.startswith("h tang") or label.startswith("so h tang ca") or label.startswith("gio tang ca") or label.startswith("gio lam them"):
+        return "overtime_hours"
+    if label.startswith("thuong"):
+        return "bonus"
+    if label.startswith("phat nq"):
+        return "nq_penalty"
+    if label.startswith("ung luong") or label.startswith("ung luong phat"):
+        return "advance_or_penalty"
+    if label.startswith("luong thang"):
+        return "final_salary"
+    if label == "so tai khoan":
+        return "bank_account"
+    if label.startswith("bat dau lam"):
+        return "start_work_note"
+    if label.startswith("ghi chu"):
+        return "note"
+    return None
+
+
+def _legacy_payroll_sections(ws) -> list[tuple[int, dict[str, int]]]:
+    """Find both normal summary tables and the old Xưởng 2 block format.
+
+    The old form places the employee code in the first cell of the summary
+    header row instead of writing a literal ``Mã`` label.  Its real data is on
+    the next row, so a label-only scanner misses the entire payroll section.
+    """
+    sections: list[tuple[int, dict[str, int]]] = []
+    payroll_keys = {
+        "monthly_salary", "daily_salary", "hourly_salary", "work_days",
+        "overtime_hours", "bonus", "nq_penalty", "advance_or_penalty", "final_salary",
+    }
+    for row in range(1, min(ws.max_row, 100_000) + 1):
+        fields = _legacy_payroll_header_fields(ws, row)
+        if "code" not in fields:
+            first = ws.cell(row, 1).value
+            second = _plain_text(ws.cell(row, 2).value)
+            if _clean_code(first) and second in {"ten", "ten nv", "ten nhan vien", "ho va ten", "ho ten"}:
+                fields["code"] = 1
+                fields.setdefault("name", 2)
+        if "code" not in fields or not payroll_keys.intersection(fields):
+            continue
+        # A raw attendance header may contain Mã NV but never has payroll
+        # fields; requiring at least two payroll labels filters it out.
+        if len(payroll_keys.intersection(fields)) < 2:
+            continue
+        sections.append((row, fields))
+    return sections
+
+
+def _legacy_payroll_data_row(ws, header_row: int, fields: dict[str, int]) -> int | None:
+    code_col = fields["code"]
+    for row in range(header_row + 1, min(ws.max_row, header_row + 6) + 1):
+        code = _clean_code(ws.cell(row, code_col).value)
+        if not code:
+            continue
+        values = [ws.cell(row, col).value for key, col in fields.items() if key != "code"]
+        if any(value not in (None, "") for value in values):
+            return row
+    return None
+
+
+def _legacy_adjacent_summary_values(ws, header_row: int) -> dict[str, Any]:
+    """Read values stored on the metadata row above an old summary header.
+
+    Older Xưởng 2 sheets put ``Bắt đầu làm ...`` and the free-form note on the
+    same row as ``Tổng h làm`` instead of giving them dedicated header cells.
+    Keep those values when converting the vertical layout to Output 2.
+    """
+    result: dict[str, Any] = {}
+    start_row = max(1, header_row - 3)
+    for row in range(start_row, header_row):
+        for col in range(1, min(ws.max_column, MAX_FACTORY2_COLUMNS) + 1):
+            raw_value = ws.cell(row, col).value
+            label = _plain_text(raw_value)
+            if not label:
+                continue
+            field = _legacy_payroll_field(label)
+            if field == "start_work_note":
+                # A value such as "Bắt đầu làm T3/2023" is itself the data,
+                # while a bare header "Bắt đầu làm" takes the next cell.
+                if label not in {"bat dau lam", "bat dau vao lam"}:
+                    result.setdefault("start_work_note", str(raw_value).strip())
+                    continue
+            if field not in {"total_hours", "work_days", "overtime_hours", "start_work_note", "note"}:
+                continue
+            for value_col in range(col + 1, min(ws.max_column, col + 4) + 1):
+                value = ws.cell(row, value_col).value
+                if value not in (None, ""):
+                    result.setdefault(field, value)
+                    break
+
+        # In the common legacy form, the note is the free text immediately
+        # after the numeric total-hours value (there is no "Ghi chú" label).
+        for col in range(1, min(ws.max_column, MAX_FACTORY2_COLUMNS) + 1):
+            if _legacy_payroll_field(_plain_text(ws.cell(row, col).value)) != "total_hours":
+                continue
+            numeric_col = next(
+                (
+                    candidate
+                    for candidate in range(col + 1, min(ws.max_column, col + 4) + 1)
+                    if isinstance(ws.cell(row, candidate).value, (int, float))
+                    and not isinstance(ws.cell(row, candidate).value, bool)
+                ),
+                None,
+            )
+            if numeric_col is None:
+                continue
+            for note_col in range(numeric_col + 1, min(ws.max_column, numeric_col + 4) + 1):
+                candidate = ws.cell(row, note_col).value
+                if isinstance(candidate, str) and candidate.strip():
+                    result.setdefault("note", candidate.strip())
+                    break
+    return result
 
 
 def _export_factory2_output2_vertical(
@@ -347,8 +538,21 @@ def _read_active_employees(
         period_month = None
         period_year = None
 
-        for row in range(header_row + 1, ws.max_row + 1):
+        trailing_empty_rows = 0
+        last_source_row = min(ws.max_row, 100_000)
+        relevant_columns = [columns["code"], columns["date"], *columns["punches"]]
+        if "name" in columns:
+            relevant_columns.append(columns["name"])
+
+        for row in range(header_row + 1, last_source_row + 1):
             code = _clean_code(ws.cell(row=row, column=columns["code"]).value)
+            has_relevant_value = any(ws.cell(row=row, column=col).value not in (None, "") for col in relevant_columns)
+            if not has_relevant_value:
+                trailing_empty_rows += 1
+                if trailing_empty_rows >= MAX_TRAILING_EMPTY_ROWS:
+                    break
+                continue
+            trailing_empty_rows = 0
             if not code:
                 continue
 
@@ -392,7 +596,7 @@ def _read_active_employees(
 def _select_factory2_sheet(wb):
     for ws in wb.worksheets:
         for row in range(1, min(ws.max_row, 20) + 1):
-            headers = [_plain_text(ws.cell(row=row, column=col).value) for col in range(1, min(ws.max_column, 20) + 1)]
+            headers = [_plain_text(ws.cell(row=row, column=col).value) for col in range(1, min(ws.max_column, MAX_FACTORY2_COLUMNS) + 1)]
             if not any("ma" in value and "nv" in value for value in headers):
                 continue
             if not any(value.startswith("ngay") or value.startswith("nga") for value in headers):
@@ -406,7 +610,7 @@ def _select_factory2_sheet(wb):
 
 def _factory2_columns(ws, header_row: int) -> dict | None:
     columns: dict[str, object] = {"punches": []}
-    for col in range(1, ws.max_column + 1):
+    for col in range(1, min(ws.max_column, MAX_FACTORY2_COLUMNS) + 1):
         text = _plain_text(ws.cell(row=header_row, column=col).value)
         if not text:
             continue
@@ -414,7 +618,7 @@ def _factory2_columns(ws, header_row: int) -> dict | None:
             columns["code"] = col
         elif ("ten" in text or text.startswith("te") or "name" in text) and "name" not in columns:
             columns["name"] = col
-        elif text.startswith("ngay") or text.startswith("nga") or text == "date":
+        elif (text.startswith("ngay") or text.startswith("nga") or text == "date") and "date" not in columns:
             columns["date"] = col
         elif text.startswith("lan") or text.startswith("la"):
             columns["punches"].append(col)
@@ -493,11 +697,11 @@ def _build_employee_preview(
     work_days = total_hours / 8
     final_salary = total_hours * hourly_salary + entry.bonus
     from app.services.bank_account_store import get_saved_account_number
-    fallback_name = employee.source_name if employee.source_name != employee.employee_code else ""
+    fallback_name = normalize_employee_name(employee.source_name) if employee.source_name != employee.employee_code else ""
 
     return {
         "employee_code": employee.employee_code,
-        "name": entry.name or fallback_name,
+        "name": normalize_employee_name(entry.name or fallback_name),
         "bank_account": get_saved_account_number(factory, employee.employee_code),
         "start_work_note": entry.start_work_note,
         "note": entry.note,
@@ -699,6 +903,10 @@ def _review_overrides_by_employee_day(items: list[dict]) -> dict[tuple[str, int]
 
 def _plain_text(value: object) -> str:
     text = _clean_text(value).lower()
+    # Vietnamese "đ" does not decompose under NFD, so map it explicitly
+    # before stripping combining marks (otherwise "bắt đầu" becomes
+    # "bat au" and the legacy field matcher cannot recognize it).
+    text = text.replace("đ", "d")
     text = unicodedata.normalize("NFD", text)
     text = "".join(char for char in text if unicodedata.category(char) != "Mn")
     text = re.sub(r"[^a-z0-9]+", " ", text)

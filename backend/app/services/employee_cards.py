@@ -18,6 +18,7 @@ from app.services.block_detector import detect_employee_blocks
 from app.services.owner_profile_sync import sync_latest_final_copy_profile
 from app.services.payroll_workbook import export_payroll_workbook, preview_payroll
 from app.services.period_detector import detect_period_from_sheet
+from app.services.payroll_store import normalize_employee_name
 from app.services.workbook_processor import analyze_workbook, export_processed_workbook
 
 
@@ -88,7 +89,7 @@ def export_employee_screenshots_from_workbook(
         used_filenames: set[str] = set()
         for index, block in enumerate(blocks, start=1):
             employee_code = str(block.employee_code)
-            name = str(worksheet.cell(block.result_row, name_column).value or "").strip()
+            name = normalize_employee_name(worksheet.cell(block.result_row, name_column).value)
             filename = _unique_card_filename(
                 _card_filename(employee_code, {"name": name}, kind, period_label),
                 used_filenames,
@@ -450,7 +451,7 @@ def _draw_payroll_section(
 
 
 def _payroll_name_value(payroll: dict) -> str:
-    name = str(payroll.get("name") or "").strip()
+    name = normalize_employee_name(payroll.get("name"))
     start_work_note = _format_start_work_note(payroll.get("start_work_note"))
     return "\n".join(part for part in [name, start_work_note] if part)
 
@@ -694,7 +695,7 @@ def _format_start_work_note(value: object) -> str:
 
 
 def _employee_name(payroll: dict | None) -> str:
-    return str((payroll or {}).get("name") or "").strip()
+    return normalize_employee_name((payroll or {}).get("name"))
 
 
 def _money(value: object) -> str:
@@ -765,7 +766,7 @@ def _period_range_label(period: dict) -> str:
 
 
 def _card_filename(employee_code: str, payroll: dict | None, kind: str, period_label: str) -> str:
-    name = str((payroll or {}).get("name") or "").strip()
+    name = normalize_employee_name((payroll or {}).get("name"))
     suffix = "_".join(part for part in ["bang_cong", employee_code, name, kind, period_label] if part)
     safe = re.sub(r"[^\w.\-]+", "_", suffix, flags=re.UNICODE).strip("_")
     return f"{safe or employee_code}.png"

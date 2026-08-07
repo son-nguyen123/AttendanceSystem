@@ -24,6 +24,7 @@ MONEY_FORMAT = '#,##0'
 INTEGER_NUMBER_FORMAT = '#,##0'
 NUMBER_FORMAT = '#,##0.##'
 FONT_NAME = "Arial"
+ATTENDANCE_DAY_COLUMN_WIDTH = 6.2
 
 
 def analyze_workbook(path: Path) -> dict:
@@ -114,6 +115,7 @@ def export_processed_workbook(
 
     for block in blocks:
         _format_attendance_time_row(ws, block)
+        _format_attendance_punch_row(ws, block)
         _write_employee_info_line(ws, block, factory=factory)
         for item in _compute_block(ws, block):
             override = overrides.get((block.employee_code, item.day), {})
@@ -130,6 +132,7 @@ def export_processed_workbook(
             ws.cell(row=block.result_row, column=item.column).value = (
                 work_value if work_value is not None and work_value != "" else None
             )
+        _center_attendance_numbers(ws, block)
         _write_output1_summary_block(ws, block, factory=factory)
 
     # Output 1 intentionally stops after the public employee information
@@ -237,6 +240,35 @@ def _format_attendance_time_row(ws, block) -> None:
         cell = ws.cell(row=header_row, column=col)
         cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
         cell.font = Font(name=FONT_NAME, size=11)
+
+
+def _format_attendance_punch_row(ws, block) -> None:
+    """Keep legacy punch strings readable in the recreated frame."""
+
+    max_punch_count = 1
+    for column in range(1, 32):
+        cell = ws.cell(row=block.punch_row, column=column)
+        punches = parse_punches(cell.value)
+        if punches:
+            cell.value = "\n".join(punches)
+            max_punch_count = max(max_punch_count, len(punches))
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.font = Font(name=FONT_NAME, size=8)
+
+    for column in range(1, 32):
+        ws.column_dimensions[get_column_letter(column)].width = ATTENDANCE_DAY_COLUMN_WIDTH
+
+    ws.row_dimensions[block.punch_row].height = min(max(100, 15 * max_punch_count + 5), 150)
+
+
+def _center_attendance_numbers(ws, block) -> None:
+    for row in (block.missing_row, block.late_row, block.result_row):
+        for column in range(1, 32):
+            ws.cell(row=row, column=column).alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True,
+            )
 
 
 def _write_employee_info_line(ws, block, factory: str = "factory1") -> None:

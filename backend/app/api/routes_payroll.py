@@ -70,12 +70,16 @@ def get_profile_sync_status(
 def get_payroll_employees(
     session_id: str | None = Query(default=None),
     factory: str = Query(default="factory1"),
+    refresh_profiles: bool = Query(default=False),
     user: dict = Depends(require_owner),
 ) -> dict[str, Any]:
     if not session_id:
         # Keep the employee registry in sync with the newest saved final copy
-        # even before a new attendance workbook is uploaded.
-        sync_latest_final_copy_profile(None, factory)
+        # when explicitly requested. The normal registry read must stay fast;
+        # rescanning a large final-copy workbook on every page load makes the
+        # backend feel blocked even though the JSON registry is ready.
+        if refresh_profiles:
+            sync_latest_final_copy_profile(None, factory)
         return {
             "employees": list_payroll_employees(factory),
             "payroll_data": load_payroll_data(factory),

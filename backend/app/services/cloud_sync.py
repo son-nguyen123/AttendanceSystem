@@ -11,10 +11,13 @@ from app.services.drive_backup import (
     create_drive_backup,
     create_final_excel_copy,
     create_period_excel_backup,
+    delete_drive_machine_files,
+    delete_final_excel_copy,
     delete_drive_period_files,
     default_backup_dir,
     drive_backup_paths,
     list_final_excel_copies,
+    list_analysis_excel_copies,
     resolve_final_excel_copy,
 )
 
@@ -23,6 +26,7 @@ STORAGE_DIR = Path(__file__).resolve().parents[2] / "storage"
 CONFIG_PATH = STORAGE_DIR / "cloud_config.json"
 REQUEST_TIMEOUT_SECONDS = 20
 SUBMISSION_BUCKET = "attendance-submissions"
+LOCAL_EXPORT_DIR = STORAGE_DIR / "local_exports"
 
 
 def get_cloud_config(include_secret: bool = False) -> dict[str, Any]:
@@ -39,6 +43,7 @@ def get_cloud_config(include_secret: bool = False) -> dict[str, Any]:
         "key_hint": _key_hint(key),
         "drive_backup_enabled": bool(config.get("drive_backup_enabled")),
         "drive_backup_dir": str(config.get("drive_backup_dir") or default_backup_dir()),
+        "local_export_dir": str(config.get("local_export_dir") or LOCAL_EXPORT_DIR),
         "backup_on_history_change": bool(config.get("backup_on_history_change", True)),
         "last_backup_at": config.get("last_backup_at"),
         "last_backup_path": config.get("last_backup_path"),
@@ -69,6 +74,7 @@ def save_cloud_config(data: dict[str, Any]) -> dict[str, Any]:
         "sync_on_save": bool(data.get("sync_on_save", False)),
         "drive_backup_enabled": bool(data.get("drive_backup_enabled")),
         "drive_backup_dir": str(data.get("drive_backup_dir") or current.get("drive_backup_dir") or default_backup_dir()).strip(),
+        "local_export_dir": str(data.get("local_export_dir") or current.get("local_export_dir") or LOCAL_EXPORT_DIR).strip(),
         "backup_on_history_change": bool(data.get("backup_on_history_change", True)),
         "last_test_at": current.get("last_test_at"),
         "last_sync_at": current.get("last_sync_at"),
@@ -353,11 +359,28 @@ def run_analysis_excel_copy(
     month: int,
     year: int,
     factory: str = "factory1",
+    replace_existing: bool = False,
 ) -> dict[str, Any]:
     config = _read_config()
-    result = create_analysis_excel_copy(config, source_path, original_filename, month, year, factory=factory)
+    result = create_analysis_excel_copy(
+        config,
+        source_path,
+        original_filename,
+        month,
+        year,
+        factory=factory,
+        replace_existing=replace_existing,
+    )
     _update_config(last_backup_at=_now(), last_backup_path=result["path"], last_backup_error=None)
     return result
+
+
+def list_drive_analysis_copies(
+    month: int,
+    year: int,
+    factory: str = "factory1",
+) -> list[dict[str, Any]]:
+    return list_analysis_excel_copies(_read_config(), month=month, year=year, factory=factory)
 
 
 def run_final_excel_copy(
@@ -367,6 +390,7 @@ def run_final_excel_copy(
     year: int,
     factory: str = "factory1",
     profile_sync_mode: str = "replace_manual",
+    replace_existing: bool = False,
 ) -> dict[str, Any]:
     config = _read_config()
     result = create_final_excel_copy(
@@ -377,6 +401,7 @@ def run_final_excel_copy(
         year,
         factory=factory,
         profile_sync_mode=profile_sync_mode,
+        replace_existing=replace_existing,
     )
     _update_config(last_backup_at=_now(), last_backup_path=result["path"], last_backup_error=None)
     return result
@@ -392,6 +417,14 @@ def list_drive_final_copies(
 
 def resolve_drive_final_copy(copy_id: str) -> Path:
     return resolve_final_excel_copy(_read_config(), copy_id)
+
+
+def delete_drive_final_copy(copy_id: str) -> dict[str, Any]:
+    return delete_final_excel_copy(_read_config(), copy_id)
+
+
+def delete_drive_machine_backup(month: int, year: int, factory: str) -> dict[str, Any]:
+    return delete_drive_machine_files(_read_config(), month=month, year=year, factory=factory)
 
 
 def delete_drive_month(month: int, year: int, factory: str) -> dict[str, Any]:
