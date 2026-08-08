@@ -1686,20 +1686,25 @@
   position: fixed;
   z-index: 80;
   inset: 0;
-  display: grid;
+  display: flex;
   padding: 24px;
-  place-items: center;
+  align-items: flex-start;
+  justify-content: center;
+  overflow-y: auto;
   background: rgba(22, 34, 51, 0.34);
   backdrop-filter: blur(2px);
 }
 
 .smart-settings-dialog {
   width: min(620px, 100%);
+  max-height: calc(100vh - 48px);
   padding: 22px;
   border: 1px solid #cbd7e7;
   border-radius: 12px;
   background: #ffffff;
   box-shadow: 0 24px 70px rgba(28, 45, 70, 0.22);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .smart-settings-heading {
