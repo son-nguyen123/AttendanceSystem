@@ -181,7 +181,12 @@ def write_factory2_standard_source(source_path: Path, output_path: Path) -> Path
     return _write_factory1_shaped_source(source_path, output_path)
 
 
-def _read_legacy_payroll_values(source_path: Path) -> dict[str, dict[str, Any]]:
+def _read_legacy_payroll_values(
+    source_path: Path,
+    *,
+    formula_workbook=None,
+    values_workbook=None,
+) -> dict[str, dict[str, Any]]:
     """Read same-period owner values from any recognizable table in the source.
 
     Raw vertical attendance files normally have no payroll fields. Older
@@ -189,8 +194,10 @@ def _read_legacy_payroll_values(source_path: Path) -> dict[str, dict[str, Any]]:
     values must survive a frame conversion because the converted Output 2 is
     intended to become the final copy for the same month.
     """
-    formula_wb = load_workbook(source_path, data_only=False)
-    values_wb = load_workbook(source_path, data_only=True)
+    owns_formula_wb = formula_workbook is None
+    owns_values_wb = values_workbook is None
+    formula_wb = formula_workbook or load_workbook(source_path, data_only=False)
+    values_wb = values_workbook or load_workbook(source_path, data_only=True)
     try:
         result: dict[str, dict[str, Any]] = {}
         for source_ws in formula_wb.worksheets:
@@ -217,8 +224,10 @@ def _read_legacy_payroll_values(source_path: Path) -> dict[str, dict[str, Any]]:
                         item[key] = value
         return result
     finally:
-        formula_wb.close()
-        values_wb.close()
+        if owns_formula_wb:
+            formula_wb.close()
+        if owns_values_wb:
+            values_wb.close()
 
 
 def _legacy_payroll_header_fields(ws, row: int) -> dict[str, int]:
@@ -227,8 +236,19 @@ def _legacy_payroll_header_fields(ws, row: int) -> dict[str, int]:
         label = _plain_text(ws.cell(row, col).value)
         if not label:
             continue
-        if label in {"ma", "ma nv", "ma nhan vien"} and "code" not in fields:
-            fields["code"] = col
+        if label in {"ma", "ma nv", "ma nhan vien"}:
+            # A legacy employee block may also have a standalone "Mã:" label
+            # near column A.  The payroll summary's code is the one after
+            # "Tổng giờ công", so prefer that later semantic column.
+            if (
+                "code" not in fields
+                or (
+                    "total_hours" in fields
+                    and col > fields["total_hours"]
+                    and fields["code"] < fields["total_hours"]
+                )
+            ):
+                fields["code"] = col
         elif label in {"ten", "ten nv", "ten nhan vien", "ho va ten", "ten nhan vien ghi chu"} and "name" not in fields:
             fields["name"] = col
         elif label.startswith("muc tien phat nq") and "penalty_rate" not in fields:
@@ -256,6 +276,11 @@ def _legacy_payroll_field(label: str) -> str | None:
         return "overtime_hours"
     if label.startswith("thuong"):
         return "bonus"
+    if label in {"ung luong + phat", "ung luong va phat"}:
+        # Legacy Factory 1 stores these two deductions in one input column.
+        # Keep the complete amount in the new advance input so the existing
+        # payroll formula produces the same result without changing formulas.
+        return "advance_or_penalty"
     if label.startswith("phat nq"):
         return "nq_penalty"
     if label.startswith("ung luong") or label.startswith("ung luong phat"):

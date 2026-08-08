@@ -2985,8 +2985,13 @@ function App() {
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       })
       downloadBlob(response.data, filename)
-      const readyToSave = await inspectFinalCopyFile(convertedFile)
-      if (!readyToSave) return
+      // The conversion endpoint just created this workbook, so validating it
+      // again by uploading the same bytes to /cloud/final-copy/period only
+      // adds another workbook read and keeps the dialog busy unnecessarily.
+      // The final-copy save endpoint still performs the strict validation.
+      setFinalCopyFile(convertedFile)
+      setFinalCopyMonth(response.headers['x-period-month'] ?? '')
+      setFinalCopyYear(response.headers['x-period-year'] ?? '')
       setFactory1LegacyDialogOpen(false)
       setFactory1LegacyFile(null)
       setMessage('Đã chuyển bảng cũ Xưởng 1 sang khung mới có công thức, giữ mã/tên, Bắt đầu làm và ghi chú; dữ liệu ngân hàng không được nhập. File đã đặt sẵn vào Bản sao cuối cùng Xưởng 1 để bạn kiểm tra và lưu.')
@@ -3817,7 +3822,7 @@ function App() {
               />
             </div>
             <div className="factory2-converter-note">
-              Khung mới giữ mã, tên, mức lương, giờ làm thêm, Bắt đầu làm và ghi chú của bảng cũ; ngân hàng không được nhập. Các cột tính lương sẽ dùng công thức của khung mới, sau đó file được đặt sẵn vào Bản sao cuối cùng Xưởng 1 để bạn kiểm tra và lưu.
+              Khung mới giữ mã, tên, mức lương, giờ làm thêm, thưởng, Bắt đầu làm và ghi chú của bảng cũ; ngân hàng không được nhập. Nếu bảng cũ có cột “Ứng Lương + Phạt”, toàn bộ số tiền sẽ được nhập vào cột “Ứng Lương” của bảng mới. Công thức lương không đổi, để kết quả tháng cũ không bị sai số; file được đặt sẵn vào Bản sao cuối cùng Xưởng 1 để bạn kiểm tra và lưu.
             </div>
             <div className="employee-card-archive-actions">
               <button type="button" className="secondary-button" disabled={factory1LegacyLoading} onClick={() => setFactory1LegacyDialogOpen(false)}>

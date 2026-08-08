@@ -25,6 +25,7 @@ from app.services.data_mapper import (
 )
 from app.services.payroll_store import normalize_employee_name
 from app.services.payroll_workbook import export_payroll_workbook
+from app.services.workbook_processor import export_processed_workbook
 
 
 _OVERTIME_LABELS = {
@@ -64,9 +65,17 @@ def export_factory1_legacy_output2(source_path: Path, output_path: Path) -> Path
         # Reuse the semantic summary reader for period-specific inputs such as
         # bonus, penalty and advance.  Calculated daily/hourly/final values are
         # intentionally not copied below because the new frame writes formulas.
+        # In particular, the old combined "Ứng Lương + Phạt" field is read by
+        # that helper as ``advance_or_penalty`` so its full amount is entered in
+        # the new "Ứng Lương" cell.  The formula itself is unchanged: the new
+        # frame simply receives the same monthly input value.
         from app.services.factory2_workbook import _read_legacy_payroll_values
 
-        summary_values = _read_legacy_payroll_values(readable_path)
+        summary_values = _read_legacy_payroll_values(
+            readable_path,
+            formula_workbook=workbook,
+            values_workbook=values_workbook,
+        )
         overtime = _legacy_overtime_by_code(source_sheet, values_sheet, records)
         workbook.close()
         values_workbook.close()
@@ -87,24 +96,24 @@ def export_factory1_legacy_output2(source_path: Path, output_path: Path) -> Path
                 # from filling a bank number from the local bank registry.
                 "bank_account": "",
             }
-            old_final_salary = _number(old_values.get("final_salary"))
-            if old_final_salary is not None:
-                # A conversion is a historical snapshot. Keep the old final
-                # salary as a value so adding the new frame formulas cannot
-                # silently change the archived month's result.
-                item["final_salary"] = old_final_salary
             for key in ("penalty_rate", "nq_penalty", "advance_or_penalty"):
                 value = _number(old_values.get(key))
                 if value is not None:
                     item[key] = value
             source_values[code] = item
 
+        # The normal payroll export first creates Output 1 and then reads it
+        # again to write Output 2.  Reuse that processed intermediate here so
+        # a legacy conversion does not load the same large workbook twice.
+        processed_path = Path(temp_dir) / "processed.xlsx"
+        export_processed_workbook(readable_path, processed_path, factory="factory1")
         return export_payroll_workbook(
-            readable_path,
+            processed_path,
             output_path,
             include_saved_data=True,
             factory="factory1",
             source_payroll_values=source_values,
+            source_is_processed=True,
         )
 
 

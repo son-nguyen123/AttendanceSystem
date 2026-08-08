@@ -54,13 +54,19 @@ def export_payroll_workbook(
     profile_codes: set[str] | None = None,
     factory: str = "factory1",
     source_payroll_values: dict[str, dict] | None = None,
+    source_is_processed: bool = False,
 ) -> Path:
-    with NamedTemporaryFile(suffix=".xlsx", delete=False) as temp_file:
-        temp_output1 = Path(temp_file.name)
+    temp_output1 = None
+    if not source_is_processed:
+        with NamedTemporaryFile(suffix=".xlsx", delete=False) as temp_file:
+            temp_output1 = Path(temp_file.name)
 
     try:
-        export_processed_workbook(source_path, temp_output1, review_overrides=review_overrides, factory=factory)
-        wb = load_workbook(temp_output1, data_only=False)
+        processed_path = source_path
+        if not source_is_processed:
+            export_processed_workbook(source_path, temp_output1, review_overrides=review_overrides, factory=factory)
+            processed_path = temp_output1
+        wb = load_workbook(processed_path, data_only=False)
         ws = _select_attendance_sheet(wb)
         blocks = detect_employee_blocks(ws)
 
@@ -86,7 +92,8 @@ def export_payroll_workbook(
         wb.save(output_path)
         return output_path
     finally:
-        temp_output1.unlink(missing_ok=True)
+        if temp_output1 is not None:
+            temp_output1.unlink(missing_ok=True)
 
 
 def apply_payroll_to_workbook(

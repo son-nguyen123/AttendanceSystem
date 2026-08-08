@@ -26,13 +26,14 @@ def _legacy_workbook(path: Path) -> None:
     sheet.cell(3, 38).value = "Số Ngày Đi Làm"
     sheet.cell(3, 39).value = "Giờ làm thêm"
     sheet.cell(3, 40).value = "Thưởng"
-    sheet.cell(3, 41).value = "Ứng Lương"
+    sheet.cell(3, 41).value = "Ứng Lương + Phạt"
     sheet.cell(3, 42).value = "Lương Tháng 05/2026"
     sheet.cell(8, 33).value = "1001"
     sheet.cell(8, 34).value = "Nguyễn Thị Mẫu"
     sheet.cell(8, 35).value = 3120000
     sheet.cell(8, 39).value = 2.5
     sheet.cell(8, 40).value = 100000
+    sheet.cell(8, 41).value = 500000
     sheet.cell(8, 42).value = 3500000
     sheet.cell(9, 34).value = "T3/2023"
     sheet.cell(9, 35).value = "Ghi chú cũ"
@@ -63,10 +64,46 @@ class Factory1LegacyConversionTests(unittest.TestCase):
             self.assertTrue(sheet["AL7"].value.startswith("=IF("))
             self.assertTrue(sheet["AM7"].value.startswith("=SUM("))
             self.assertEqual(sheet["AN7"].value, 2.5)
+            self.assertEqual(sheet["AO7"].value, 100000)
+            self.assertEqual(sheet["AQ7"].value, 500000)
+            self.assertTrue(sheet["AP7"].value.startswith("=IF("))
             self.assertTrue(str(sheet["AI8"].value).startswith("Bắt đầu làm"))
             self.assertEqual(sheet["AJ8"].value, "Ghi chú cũ")
             self.assertIn(sheet["AI6"].value, (None, ""))
             self.assertTrue(sheet["AR7"].value.startswith("=IF("))
+        finally:
+            import shutil
+
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_keeps_separate_penalty_and_advance_inputs_when_old_file_has_both(self):
+        import tempfile
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="factory1-separate-deductions-test-"))
+        try:
+            source = temp_dir / "legacy.xlsx"
+            output = temp_dir / "converted.xlsx"
+            _legacy_workbook(source)
+
+            workbook = load_workbook(source)
+            sheet = workbook.active
+            sheet.cell(3, 41).value = "Phạt NQ"
+            sheet.cell(8, 41).value = 100000
+            sheet.cell(3, 42).value = "Ứng Lương"
+            sheet.cell(8, 42).value = 500000
+            sheet.cell(3, 43).value = "Lương Tháng 05/2026"
+            sheet.cell(8, 43).value = 3500000
+            workbook.save(source)
+            workbook.close()
+
+            export_factory1_legacy_output2(source, output)
+            converted = load_workbook(output, data_only=False)
+            sheet = converted.active
+            self.assertEqual(sheet["AO7"].value, 100000)
+            self.assertEqual(sheet["AP7"].value, 100000)
+            self.assertEqual(sheet["AQ7"].value, 500000)
+            self.assertTrue(sheet["AR7"].value.startswith("=IF("))
+            converted.close()
         finally:
             import shutil
 

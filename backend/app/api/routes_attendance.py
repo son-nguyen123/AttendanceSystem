@@ -24,6 +24,7 @@ from app.services.factory2_workbook import analyze_factory2_workbook, export_fac
 from app.services.factory1_workbook import export_factory1_legacy_output2
 from app.services.owner_profile_sync import sync_latest_final_copy_profile
 from app.services.payroll_workbook import apply_payroll_to_workbook
+from app.services.period_detector import detect_period_from_workbook
 from app.services.workbook_processor import analyze_workbook, export_processed_workbook
 from app.services.workbook_recalculator import recalculate_workbook_totals
 from app.services.workbook_normalizer import inspect_workbook_layout, normalize_raw_attendance_workbook
@@ -522,14 +523,21 @@ async def convert_factory1_legacy_workbook(
 
     try:
         export_factory1_legacy_output2(source_path, output_path)
+        period = detect_period_from_workbook(output_path)
     except Exception as exc:
         shutil.rmtree(conversion_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=f"KhÃ´ng chuyá»ƒn Ä‘Æ°á»£c báº£ng cÅ© XÆ°á»Ÿng 1: {exc}") from exc
 
+    headers = {}
+    if period.get("month"):
+        headers["X-Period-Month"] = str(period["month"])
+    if period.get("year"):
+        headers["X-Period-Year"] = str(period["year"])
     return FileResponse(
         output_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename="Xuong1_Output2_KhungMoi.xlsx",
+        headers=headers,
         background=BackgroundTask(shutil.rmtree, conversion_dir, ignore_errors=True),
     )
 
