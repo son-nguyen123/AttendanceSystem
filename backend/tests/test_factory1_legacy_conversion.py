@@ -12,6 +12,7 @@ def _legacy_workbook(path: Path) -> None:
     sheet.title = "May"
     sheet["A1"] = "Att. Time"
     sheet["C1"] = "2026-05-01 ~ 2026-05-31"
+    sheet["D2"] = 1
     sheet["A3"] = "Mã:"
     sheet["C3"] = "1001"
     sheet["D4"] = "07:2707:2711:3512:5817:01"
@@ -54,6 +55,7 @@ class Factory1LegacyConversionTests(unittest.TestCase):
             sheet = load_workbook(output, data_only=False).active
 
             self.assertEqual(sheet["D4"].value, "07:27\n11:35\n12:58\n17:01")
+            self.assertEqual(sheet["D7"].value, 8)
             self.assertEqual(sheet["D7"].alignment.horizontal, "center")
             self.assertEqual(sheet.column_dimensions["A"].width, 6.2)
             self.assertEqual(sheet.column_dimensions["AE"].width, 6.2)
@@ -71,6 +73,40 @@ class Factory1LegacyConversionTests(unittest.TestCase):
             self.assertEqual(sheet["AJ8"].value, "Ghi chú cũ")
             self.assertIn(sheet["AI6"].value, (None, ""))
             self.assertTrue(sheet["AR7"].value.startswith("=IF("))
+            self.assertEqual(sheet.parent.calculation.calcMode, "auto")
+            self.assertTrue(sheet.parent.calculation.fullCalcOnLoad)
+            self.assertTrue(sheet.parent.calculation.forceFullCalc)
+        finally:
+            import shutil
+
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_preserves_historical_work_and_forces_formula_recalculation(self):
+        import tempfile
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="factory1-history-work-test-"))
+        try:
+            source = temp_dir / "legacy.xlsx"
+            output = temp_dir / "converted.xlsx"
+            _legacy_workbook(source)
+
+            workbook = load_workbook(source)
+            sheet = workbook.active
+            sheet["D7"] = 9.75
+            workbook.calculation.calcMode = "manual"
+            workbook.calculation.fullCalcOnLoad = False
+            workbook.calculation.forceFullCalc = False
+            workbook.save(source)
+            workbook.close()
+
+            export_factory1_legacy_output2(source, output)
+            converted = load_workbook(output, data_only=False)
+            sheet = converted.active
+            self.assertEqual(sheet["D7"].value, 9.75)
+            self.assertEqual(converted.calculation.calcMode, "auto")
+            self.assertTrue(converted.calculation.fullCalcOnLoad)
+            self.assertTrue(converted.calculation.forceFullCalc)
+            converted.close()
         finally:
             import shutil
 

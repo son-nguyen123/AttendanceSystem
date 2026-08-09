@@ -17,6 +17,7 @@ from tempfile import TemporaryDirectory
 import xlrd
 from openpyxl import Workbook, load_workbook
 
+from app.services.block_detector import detect_employee_blocks
 from app.services.data_mapper import (
     _normalize_employee_code,
     _normalize_label,
@@ -77,6 +78,7 @@ def export_factory1_legacy_output2(source_path: Path, output_path: Path) -> Path
             values_workbook=values_workbook,
         )
         overtime = _legacy_overtime_by_code(source_sheet, values_sheet, records)
+        historical_work_overrides = _legacy_work_overrides(source_sheet, values_sheet)
         workbook.close()
         values_workbook.close()
         source_values: dict[str, dict] = {}
@@ -106,7 +108,12 @@ def export_factory1_legacy_output2(source_path: Path, output_path: Path) -> Path
         # again to write Output 2.  Reuse that processed intermediate here so
         # a legacy conversion does not load the same large workbook twice.
         processed_path = Path(temp_dir) / "processed.xlsx"
-        export_processed_workbook(readable_path, processed_path, factory="factory1")
+        export_processed_workbook(
+            readable_path,
+            processed_path,
+            review_overrides=historical_work_overrides,
+            factory="factory1",
+        )
         return export_payroll_workbook(
             processed_path,
             output_path,
@@ -115,6 +122,34 @@ def export_factory1_legacy_output2(source_path: Path, output_path: Path) -> Path
             source_payroll_values=source_values,
             source_is_processed=True,
         )
+
+
+def _legacy_work_overrides(source_sheet, values_sheet) -> list[dict]:
+    """Keep the archived daily work values when rebuilding an old month."""
+    overrides: list[dict] = []
+    for block in detect_employee_blocks(source_sheet):
+        for column in range(1, 32):
+            day = source_sheet.cell(block.day_row, column).value
+            if isinstance(day, bool):
+                continue
+            if isinstance(day, float) and day.is_integer():
+                day = int(day)
+            if not isinstance(day, int) or not 1 <= day <= 31:
+                continue
+
+            work_value = values_sheet.cell(block.result_row, column).value
+            if work_value in (None, ""):
+                work_value = source_sheet.cell(block.result_row, column).value
+            if work_value in (None, ""):
+                continue
+            overrides.append(
+                {
+                    "employee_code": block.employee_code,
+                    "day": day,
+                    "work_value": work_value,
+                }
+            )
+    return overrides
 
 
 def _select_sheet(workbook):

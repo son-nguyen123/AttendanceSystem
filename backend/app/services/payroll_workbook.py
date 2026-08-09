@@ -88,6 +88,7 @@ def export_payroll_workbook(
         _write_monthly_grand_total(ws, blocks)
         _set_payroll_column_widths(ws)
         _format_title_area(ws, PAYROLL_END_COL)
+        _enable_formula_recalculation(wb)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         wb.save(output_path)
         return output_path
@@ -589,6 +590,15 @@ def _unmerge_overlapping(ws, start_row: int, start_col: int, end_row: int, end_c
 def _thin_border() -> Border:
     side = Side(style="thin", color="000000")
     return Border(left=side, right=side, top=side, bottom=side)
+
+
+def _enable_formula_recalculation(workbook) -> None:
+    calculation = getattr(workbook, "calculation", None)
+    if calculation is None:
+        return
+    calculation.calcMode = "auto"
+    calculation.fullCalcOnLoad = True
+    calculation.forceFullCalc = True
 
 
 def _set_payroll_column_widths(ws) -> None:
