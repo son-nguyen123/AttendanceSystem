@@ -34,7 +34,11 @@ def _analysis(employee_code: str, day: int, punches: list[str]) -> dict:
 
 
 def _enable_first_time_employee(monkeypatch) -> None:
-    monkeypatch.setattr(newcomer_benefit, "list_known_employee_codes", lambda factory: [])
+    monkeypatch.setattr(
+        newcomer_benefit,
+        "list_known_employee_codes_before_period",
+        lambda factory, month, year: [],
+    )
     monkeypatch.setattr(
         newcomer_benefit,
         "get_latest_period_snapshot",
@@ -89,8 +93,12 @@ def test_first_day_keeps_anomaly_from_later_shift(monkeypatch) -> None:
     assert any("ra/vào giữa giờ công" in item["messages"][0] for item in analysis["manual_checks"])
 
 
-def test_known_employee_never_gets_newcomer_benefit(monkeypatch) -> None:
-    monkeypatch.setattr(newcomer_benefit, "list_known_employee_codes", lambda factory: ["1420"])
+def test_employee_known_before_period_never_gets_newcomer_benefit(monkeypatch) -> None:
+    monkeypatch.setattr(
+        newcomer_benefit,
+        "list_known_employee_codes_before_period",
+        lambda factory, month, year: ["1420"],
+    )
     monkeypatch.setattr(
         newcomer_benefit,
         "get_latest_period_snapshot",
@@ -102,3 +110,14 @@ def test_known_employee_never_gets_newcomer_benefit(monkeypatch) -> None:
 
     assert overrides == []
     assert analysis["blocks"][0]["results"][0]["work_value"] == 6.5
+
+
+def test_reanalyzing_saved_current_period_keeps_newcomer_benefit(monkeypatch) -> None:
+    """A saved July period must not turn its own new codes into old codes."""
+    _enable_first_time_employee(monkeypatch)
+    analysis = _analysis("1420", 7, ["08:41", "11:32", "12:54", "17:02"])
+
+    overrides = newcomer_benefit.apply_newcomer_first_day_benefits(analysis, "factory1")
+
+    assert len(overrides) == 1
+    assert analysis["blocks"][0]["results"][0]["work_value"] == 8

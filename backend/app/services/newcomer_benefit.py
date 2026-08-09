@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from app.services.attendance_calculator import calculate_day, _round_work_minutes
-from app.services.history_store import get_latest_period_snapshot, list_known_employee_codes
+from app.services.history_store import get_latest_period_snapshot, list_known_employee_codes_before_period
 from app.services.punch_parser import time_to_minutes, minutes_to_time
 
 
@@ -28,7 +28,10 @@ def apply_newcomer_first_day_benefits(analysis: dict, factory: str) -> list[dict
     if not _is_newest_analysis_period(analysis.get("period") or {}, factory):
         return []
 
-    known_codes = set(list_known_employee_codes(factory=factory))
+    period = analysis.get("period") or {}
+    month = int(period.get("month") or 0)
+    year = int(period.get("year") or 0)
+    known_codes = set(list_known_employee_codes_before_period(factory, month, year))
     overrides: list[dict] = []
     affected_keys: set[tuple[str, int]] = set()
     replacement_checks: dict[tuple[str, int], list[str]] = {}

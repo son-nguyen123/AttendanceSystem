@@ -535,6 +535,30 @@ def list_known_employee_codes(factory: str | None = None) -> list[str]:
     return [str(row["employee_code"]) for row in rows]
 
 
+def list_known_employee_codes_before_period(factory: str, month: int, year: int) -> list[str]:
+    """Return employee codes seen in saved periods strictly before a period.
+
+    The period currently being analyzed must not make its own employees look
+    like existing employees. This is especially important when a saved month
+    is opened and analyzed again.
+    """
+    init_history_db()
+    factory_filter = _normalize_factory(factory)
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT employee_code
+            FROM employee_monthly_records em
+            JOIN attendance_periods p ON p.id = em.period_id
+            WHERE p.factory = ?
+              AND (p.year < ? OR (p.year = ? AND p.month < ?))
+            ORDER BY CAST(employee_code AS INTEGER), employee_code
+            """,
+            (factory_filter, year, year, month),
+        ).fetchall()
+    return [str(row["employee_code"]) for row in rows]
+
+
 def get_latest_period_snapshot(factory: str | None = None) -> dict:
     init_history_db()
     factory_filter = _normalize_factory(factory) if factory else None
