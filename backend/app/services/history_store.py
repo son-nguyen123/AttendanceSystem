@@ -3,8 +3,10 @@ import shutil
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from time import monotonic
 from uuid import uuid4
 
 from openpyxl import load_workbook
@@ -27,6 +29,8 @@ from app.services.workbook_processor import analyze_workbook, export_processed_w
 STORAGE_DIR = Path(__file__).resolve().parents[2] / "storage"
 HISTORY_DIR = STORAGE_DIR / "history"
 DB_PATH = STORAGE_DIR / "attendance_history.db"
+ATTENDANCE_OVERVIEW_CACHE_TTL_SECONDS = 180
+_ATTENDANCE_OVERVIEW_CACHE: dict[tuple[str, int | None], tuple[float, dict]] = {}
 
 
 def init_history_db() -> None:
@@ -264,6 +268,7 @@ def save_session_to_history(
                 )
 
     detail = get_period_detail(period_id)
+    clear_attendance_overview_cache(factory)
     # A saved history period is an archive, never a profile-data source. The
     # only source allowed to refresh reusable employee data is a final copy
     # explicitly selected by the owner.
@@ -469,6 +474,7 @@ def update_employee_monthly_record(period_id: str, employee_code: str, updates: 
         )
 
     _rewrite_history_output_files(dict(period), normalized_code, daily_updates, values)
+    clear_attendance_overview_cache(period["factory"])
     return get_period_detail(period_id)
 
 
@@ -664,7 +670,34 @@ def get_review_memory(month: int, year: int, factory: str | None = None) -> dict
     return {"period": _period_row_to_dict(period), "records": records}
 
 
+def clear_attendance_overview_cache(factory: str | None = None) -> None:
+    normalized_factory = _normalize_factory(factory) if factory else None
+    if normalized_factory is None:
+        _ATTENDANCE_OVERVIEW_CACHE.clear()
+        return
+    for key in list(_ATTENDANCE_OVERVIEW_CACHE):
+        if key[0] == normalized_factory:
+            _ATTENDANCE_OVERVIEW_CACHE.pop(key, None)
+
+
 def get_attendance_overview(year: int | None = None, factory: str | None = None) -> dict:
+    normalized_factory = _normalize_factory(factory)
+    requested_year = int(year) if year else None
+    cache_key = (normalized_factory, requested_year)
+    cached = _ATTENDANCE_OVERVIEW_CACHE.get(cache_key)
+    if cached and monotonic() - cached[0] < ATTENDANCE_OVERVIEW_CACHE_TTL_SECONDS:
+        return deepcopy(cached[1])
+
+    result = _build_attendance_overview(requested_year, normalized_factory)
+    now = monotonic()
+    _ATTENDANCE_OVERVIEW_CACHE[cache_key] = (now, deepcopy(result))
+    resolved_year = int(result["year"]) if result.get("year") else None
+    if resolved_year is not None:
+        _ATTENDANCE_OVERVIEW_CACHE[(normalized_factory, resolved_year)] = (now, deepcopy(result))
+    return result
+
+
+def _build_attendance_overview(year: int | None = None, factory: str | None = None) -> dict:
     init_history_db()
     factory = _normalize_factory(factory)
     final_copies = _safe_final_copies(factory)
@@ -918,7 +951,7 @@ def delete_period(period_id: str) -> None:
     init_history_db()
     with _connect() as conn:
         conn.execute("PRAGMA foreign_keys = ON")
-        row = conn.execute("SELECT source_path FROM attendance_periods WHERE id = ?", (period_id,)).fetchone()
+        row = conn.execute("SELECT source_path, factory FROM attendance_periods WHERE id = ?", (period_id,)).fetchone()
         if row is None:
             raise KeyError(period_id)
         conn.execute("DELETE FROM attendance_periods WHERE id = ?", (period_id,))
@@ -926,6 +959,7 @@ def delete_period(period_id: str) -> None:
     period_dir = HISTORY_DIR / period_id
     if period_dir.exists():
         shutil.rmtree(period_dir)
+    clear_attendance_overview_cache(row["factory"])
 
 
 def _rewrite_history_output_files(

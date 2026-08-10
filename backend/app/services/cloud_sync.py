@@ -440,6 +440,9 @@ def run_analysis_excel_copy(
     )
     result["local_path"] = str(local_target)
     _update_config(last_backup_at=_now(), last_backup_path=result["path"], last_backup_error=None)
+    from app.services.history_store import clear_attendance_overview_cache
+
+    clear_attendance_overview_cache(factory)
     return result
 
 
@@ -499,7 +502,11 @@ def resolve_drive_final_copy(copy_id: str) -> Path:
 
 
 def delete_drive_final_copy(copy_id: str) -> dict[str, Any]:
-    return delete_final_excel_copy(_read_config(), copy_id)
+    result = delete_final_excel_copy(_read_config(), copy_id)
+    from app.services.history_store import clear_attendance_overview_cache
+
+    clear_attendance_overview_cache()
+    return result
 
 
 def delete_drive_machine_backup(month: int, year: int, factory: str) -> dict[str, Any]:

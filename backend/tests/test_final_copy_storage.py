@@ -9,10 +9,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.services import drive_backup
 from app.services import cloud_sync
 from app.services.final_copy_overview import read_final_copy_overview
+from app.services import history_store
 from backend.tests.test_workbook_guard import _write_output2
 
 
 class FinalCopyStorageTests(unittest.TestCase):
+    def test_attendance_overview_uses_temporary_cache_until_invalidated(self) -> None:
+        history_store.clear_attendance_overview_cache()
+        overview = {"year": 2026, "employees": [], "latest_month": 7}
+        with patch.object(history_store, "_build_attendance_overview", return_value=overview) as builder:
+            first = history_store.get_attendance_overview(2026, "factory2")
+            second = history_store.get_attendance_overview(2026, "factory2")
+
+            self.assertEqual(first, overview)
+            self.assertEqual(second, overview)
+            builder.assert_called_once_with(2026, "factory2")
+
+            history_store.clear_attendance_overview_cache("factory2")
+            history_store.get_attendance_overview(2026, "factory2")
+            self.assertEqual(builder.call_count, 2)
+
+        history_store.clear_attendance_overview_cache()
+
     def test_final_copy_overview_calculates_formula_only_summary_from_daily_values(self) -> None:
         from openpyxl import Workbook
 
