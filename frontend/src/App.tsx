@@ -294,6 +294,7 @@ type AttendanceOverviewEmployee = {
   total_hours: number
   total_work_days: number
   average_work_days: number
+  total_absent_days: number
   total_late_count: number
   total_issue_count: number
   active: boolean
@@ -8137,7 +8138,7 @@ function AttendanceOverviewView({
                 <th>Tổng ngày</th>
                 <th>TB/tháng</th>
                 <th>Tổng giờ</th>
-                <th>Trễ</th>
+                <th>Nghỉ</th>
                 <th>?</th>
               </tr>
             </thead>
@@ -8172,7 +8173,7 @@ function AttendanceOverviewView({
                   <td>{formatNumber(employee.total_work_days)}</td>
                   <td>{formatNumber(employee.average_work_days)}</td>
                   <td>{formatNumber(employee.total_hours)}</td>
-                  <td>{employee.total_late_count}</td>
+                  <td>{formatNumber(employee.total_absent_days)}</td>
                   <td>{employee.total_issue_count}</td>
                 </tr>
               ))}
@@ -8197,7 +8198,7 @@ function AttendanceOverviewView({
               <Metric label="Tổng ngày" value={formatNumber(selectedEmployee.total_work_days)} />
               <Metric label="TB/tháng" value={formatNumber(selectedEmployee.average_work_days)} />
               <Metric label="Tổng giờ" value={formatNumber(selectedEmployee.total_hours)} />
-              <Metric label="Trễ / ?" value={`${selectedEmployee.total_late_count} / ${selectedEmployee.total_issue_count}`} />
+              <Metric label="Nghỉ / ?" value={`${formatNumber(selectedEmployee.total_absent_days)} / ${selectedEmployee.total_issue_count}`} />
             </div>
             <AttendanceTrendChart employee={selectedEmployee} latestMonth={latestMonth} />
           </>

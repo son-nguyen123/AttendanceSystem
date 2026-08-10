@@ -827,6 +827,7 @@ def _build_attendance_overview(year: int | None = None, factory: str | None = No
                 "months": [_empty_overview_month(month) for month in range(1, 13)],
                 "total_hours": 0.0,
                 "total_work_days": 0.0,
+                "total_absent_days": 0.0,
                 "total_late_count": 0,
                 "total_issue_count": 0,
                 "active": False,
@@ -845,6 +846,7 @@ def _build_attendance_overview(year: int | None = None, factory: str | None = No
             "work_days": _round_number(work_days),
             "late_count": stats["late_count"],
             "issue_count": stats["issue_count"],
+            "has_data": True,
         }
         item["months"][month - 1] = month_item
 
@@ -860,6 +862,7 @@ def _build_attendance_overview(year: int | None = None, factory: str | None = No
                     "months": [_empty_overview_month(item_month) for item_month in range(1, 13)],
                     "total_hours": 0.0,
                     "total_work_days": 0.0,
+                    "total_absent_days": 0.0,
                     "total_late_count": 0,
                     "total_issue_count": 0,
                     "active": False,
@@ -873,13 +876,17 @@ def _build_attendance_overview(year: int | None = None, factory: str | None = No
                 "work_days": row["work_days"],
                 "late_count": 0,
                 "issue_count": 0,
+                "has_data": True,
                 "source": "final_copy",
             }
 
     for item in employees.values():
         for month_item in item["months"]:
             item["total_hours"] += float(month_item["total_hours"])
-            item["total_work_days"] += float(month_item["work_days"])
+            work_days = float(month_item["work_days"])
+            item["total_work_days"] += work_days
+            if month_item.get("has_data"):
+                item["total_absent_days"] += max(0.0, 26.0 - work_days)
             item["total_late_count"] += int(month_item["late_count"])
             item["total_issue_count"] += int(month_item["issue_count"])
 
@@ -888,6 +895,7 @@ def _build_attendance_overview(year: int | None = None, factory: str | None = No
         item["average_work_days"] = _round_number(item["total_work_days"] / overview_month_count)
         item["total_hours"] = _round_number(item["total_hours"])
         item["total_work_days"] = _round_number(item["total_work_days"])
+        item["total_absent_days"] = _round_number(item["total_absent_days"])
 
     employee_items = sorted(
         employees.values(),
@@ -1234,6 +1242,7 @@ def _empty_overview_month(month: int) -> dict:
         "work_days": 0,
         "late_count": 0,
         "issue_count": 0,
+        "has_data": False,
     }
 
 
