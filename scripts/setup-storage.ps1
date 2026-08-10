@@ -3,6 +3,16 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $StorageDir = Join-Path $Root "backend\storage"
 $ConfigPath = Join-Path $StorageDir "cloud_config.json"
+$CategoryFolders = @(
+    "01_Output1",
+    "02_Output2_BangLuong",
+    "03_AnhChamCong",
+    "04_NganHang",
+    "05_ChuyenKhung",
+    "06_GanDuLieu",
+    "07_TinhLai",
+    "08_BanChot_LichSu"
+)
 
 function Ask-YesNo {
     param(
@@ -127,18 +137,29 @@ $driveBackupDir = [Environment]::ExpandEnvironmentVariables($driveBackupDir)
 New-Item -ItemType Directory -Force -Path $driveBackupDir | Out-Null
 $resolvedDriveBackupDir = (Resolve-Path -LiteralPath $driveBackupDir).Path
 
-$useSupabase = $false
-$supabaseUrl = ""
-$serviceRoleKey = ""
+$config = @{}
+if (Test-Path -LiteralPath $ConfigPath) {
+    try {
+        $existing = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+        foreach ($property in $existing.PSObject.Properties) {
+            $config[$property.Name] = $property.Value
+        }
+    } catch {
+        throw "File cau hinh hien tai khong doc duoc. Khong ghi de: $ConfigPath"
+    }
+}
+if (-not $config.ContainsKey("enabled")) { $config["enabled"] = $false }
+if (-not $config.ContainsKey("supabase_url")) { $config["supabase_url"] = "" }
+if (-not $config.ContainsKey("service_role_key")) { $config["service_role_key"] = "" }
+if (-not $config.ContainsKey("sync_on_save")) { $config["sync_on_save"] = $false }
+$config["drive_backup_enabled"] = $true
+$config["drive_backup_dir"] = $resolvedDriveBackupDir
+$config["backup_on_history_change"] = $true
 
-$config = [ordered]@{
-    enabled = $useSupabase
-    supabase_url = $supabaseUrl
-    service_role_key = $serviceRoleKey
-    sync_on_save = $useSupabase
-    drive_backup_enabled = $true
-    drive_backup_dir = $resolvedDriveBackupDir
-    backup_on_history_change = $true
+foreach ($factoryFolder in @("Xuong1", "Xuong2")) {
+    foreach ($categoryFolder in $CategoryFolders) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $resolvedDriveBackupDir "$factoryFolder\$categoryFolder") | Out-Null
+    }
 }
 
 New-Item -ItemType Directory -Force -Path $StorageDir | Out-Null
@@ -150,6 +171,7 @@ Write-Host ""
 Write-Host "Da luu cau hinh: $ConfigPath" -ForegroundColor Green
 Write-Host "Google Drive backup: BAT"
 Write-Host "Thu muc: $resolvedDriveBackupDir"
+Write-Host "Da tao cay: Xuong1/Xuong2 -> 01_Output1 ... 08_BanChot_LichSu" -ForegroundColor Green
 Write-Host "Supabase: TAT - app chi luu local + Google Drive"
 Write-Host "Neu can dung Supabase sau nay, co the bat lai trong phan cai dat nang cao cua app."
 Write-Host ""

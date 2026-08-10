@@ -30,9 +30,11 @@ Máy mới cần kết nối Internet trong lần cài đầu tiên.
 git clone https://github.com/son-nguyen123/AttendanceSystem.git
 cd AttendanceSystem
 setup.bat
-setup-storage.bat
+setup-all-storage.bat
 start.bat
 ```
+
+`setup-all-storage.bat` sẽ lần lượt tạo cây thư mục local và Google Drive. Nếu muốn chạy riêng, dùng `setup-output-folders.bat` cho local và `setup-storage.bat` cho Google Drive.
 
 Để chọn một ổ/thư mục cố định và tạo sẵn các thư mục Output 1, Output 2, ảnh chấm công, ngân hàng, chuyển khung, gán dữ liệu và tính lại, chạy:
 
@@ -40,8 +42,9 @@ start.bat
 setup-output-folders.bat
 ```
 
-Các script sẽ tải môi trường Python và Node cần thiết, cài thư viện, hướng dẫn
-chọn thư mục Google Drive và khởi động ứng dụng.
+Các script sẽ tải môi trường Python và Node cần thiết, hướng dẫn chọn thư mục
+Google Drive và tạo sẵn cây `Xuong1/Xuong2 → 01…08`. Script giữ lại cấu hình local,
+Google Drive và dữ liệu hiện có; không xóa dữ liệu production.
 
 Sau khi chạy:
 
@@ -158,6 +161,7 @@ AttendanceSystem/
 ├── scripts/             Script cài đặt, chạy và dừng ứng dụng
 ├── docs/                Tài liệu nghiệp vụ và lược đồ Supabase
 ├── setup.bat            Cài môi trường
+├── setup-all-storage.bat Tạo cây local + Google Drive
 ├── setup-storage.bat    Cấu hình Google Drive/lưu trữ
 ├── start.bat            Khởi động ứng dụng
 └── stop.bat             Dừng ứng dụng
