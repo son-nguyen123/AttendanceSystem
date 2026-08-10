@@ -43,6 +43,8 @@ def _read_sheet(ws, month: int) -> list[dict[str, Any]]:
         work_days_col = _find_work_days_col(ws, header_row, name_col + 1)
         total_hours = _number(ws.cell(result_row, total_col).value)
         work_days = _number(ws.cell(result_row, work_days_col).value) if work_days_col else None
+        if total_hours is None:
+            total_hours = _sum_numeric_cells(ws, result_row, 1, total_col - 1)
         if work_days is None and total_hours is not None:
             work_days = total_hours / 8
         if total_hours is None and work_days is not None:
@@ -61,6 +63,18 @@ def _read_sheet(ws, month: int) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _sum_numeric_cells(ws, row: int, start_col: int, end_col: int) -> float | None:
+    total = 0.0
+    found = False
+    for col in range(start_col, end_col + 1):
+        value = _number(ws.cell(row, col).value)
+        if value is None:
+            continue
+        total += value
+        found = True
+    return total if found else None
 
 
 def _find_work_days_col(ws, row: int, start_col: int) -> int | None:

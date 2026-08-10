@@ -316,7 +316,8 @@ type AttendanceOverview = {
     mode: string
     final_copy_months: number[]
     machine_months: number[]
-    fallback_final_copy_months?: number[]
+    final_copy_data_months?: number[]
+    fallback_machine_months?: number[]
   }
 }
 
@@ -8076,9 +8077,11 @@ function AttendanceOverviewView({
         </div>
         {overview?.source && (
           <p className="panel-note">
-            Lịch sử đã lưu: {overview.source.machine_months.length ? overview.source.machine_months.map((month) => `T${month}`).join(', ') : 'chưa có'}.
-            {' '}Bản sao cuối dự phòng: {overview.source.fallback_final_copy_months?.length
-              ? overview.source.fallback_final_copy_months.map((month) => `T${month}`).join(', ')
+            Bản sao cuối: {overview.source.final_copy_data_months?.length
+              ? overview.source.final_copy_data_months.map((month) => `T${month}`).join(', ')
+              : 'chưa có'}.
+            {' '}Lịch sử dự phòng: {overview.source.fallback_machine_months?.length
+              ? overview.source.fallback_machine_months.map((month) => `T${month}`).join(', ')
               : 'không có'}.
           </p>
         )}

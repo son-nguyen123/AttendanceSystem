@@ -755,6 +755,17 @@ def get_attendance_overview(year: int | None = None, factory: str | None = None)
 
     latest_month = max(set(latest_by_month) | final_months)
     overview_month_count = max(1, len(set(latest_by_month) | final_months))
+    final_rows_by_month: dict[int, list[dict]] = {}
+    for copy_item in selected_final_copies:
+        month = int(copy_item["month"])
+        try:
+            final_rows = read_final_copy_overview(Path(str(copy_item["path"])), month)
+        except Exception:
+            final_rows = []
+        if final_rows:
+            final_rows_by_month[month] = final_rows
+
+    final_data_months = set(final_rows_by_month)
     daily_stats: dict[tuple[str, int], dict[str, int]] = {}
     for row in daily_rows:
         key = (str(row["employee_code"]), int(row["month"]))
@@ -771,6 +782,8 @@ def get_attendance_overview(year: int | None = None, factory: str | None = None)
     employee_names = _employee_names_by_code(factory)
     employees: dict[str, dict] = {}
     for row in monthly_rows:
+        if int(row["month"]) in final_data_months:
+            continue
         employee_code = str(row["employee_code"])
         current_name = employee_names.get(employee_code, "")
         item = employees.setdefault(
@@ -802,17 +815,7 @@ def get_attendance_overview(year: int | None = None, factory: str | None = None)
         }
         item["months"][month - 1] = month_item
 
-    for copy_item in selected_final_copies:
-        month = int(copy_item["month"])
-        # A saved history period is the trusted result produced by the app's
-        # rules. The final-copy workbook is only a fallback for months where
-        # no history exists, because its external layout may omit review data.
-        if month in latest_by_month:
-            continue
-        try:
-            final_rows = read_final_copy_overview(Path(str(copy_item["path"])), month)
-        except Exception:
-            final_rows = []
+    for month, final_rows in final_rows_by_month.items():
         for row in final_rows:
             employee_code = str(row["employee_code"])
             current_name = employee_names.get(employee_code, "")
@@ -879,11 +882,12 @@ def get_attendance_overview(year: int | None = None, factory: str | None = None)
             "total_hours": _round_number(total_hours),
         },
         "source": {
-            "mode": "prefer_history_fallback_final_copy",
+            "mode": "prefer_final_copy_fallback_history",
             "factory": factory,
             "final_copy_months": sorted(final_months),
             "machine_months": sorted(latest_by_month),
-            "fallback_final_copy_months": sorted(final_months - set(latest_by_month)),
+            "final_copy_data_months": sorted(final_data_months),
+            "fallback_machine_months": sorted(set(latest_by_month) - final_data_months),
         },
     }
 

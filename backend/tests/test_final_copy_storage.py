@@ -8,10 +8,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services import drive_backup
 from app.services import cloud_sync
+from app.services.final_copy_overview import read_final_copy_overview
 from backend.tests.test_workbook_guard import _write_output2
 
 
 class FinalCopyStorageTests(unittest.TestCase):
+    def test_final_copy_overview_calculates_formula_only_summary_from_daily_values(self) -> None:
+        from openpyxl import Workbook
+
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "final.xlsx"
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.title = "5"
+            for column in range(1, 32):
+                worksheet.cell(1, column, column)
+            worksheet.cell(1, 32, "Tổng giờ công")
+            worksheet.cell(1, 33, "Mã")
+            worksheet.cell(1, 34, "Tên")
+            worksheet.cell(1, 38, "Số Ngày Đi Làm")
+            worksheet.cell(6, 4, 8)
+            worksheet.cell(6, 5, 8.5)
+            worksheet.cell(6, 33, 1006)
+            worksheet.cell(6, 34, "Hồ Thị Tú Uyên")
+            workbook.save(path)
+            workbook.close()
+
+            rows = read_final_copy_overview(path, month=6)
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["employee_code"], "1006")
+            self.assertEqual(rows[0]["total_hours"], 16.5)
+            self.assertEqual(rows[0]["work_days"], 2.06)
+
     def test_stale_last_backup_path_is_repaired_to_new_layout(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
