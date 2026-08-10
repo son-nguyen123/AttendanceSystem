@@ -40,6 +40,22 @@ FIXED_BANK_EMPLOYEE = {
 }
 
 
+def _drive_bank_period_dir(config: dict[str, Any], factory: str, month: int, year: int) -> Path:
+    factory_no = "2" if _factory(factory) == "factory2" else "1"
+    return (
+        Path(config["drive_root_path"])
+        / f"Xuong{factory_no}"
+        / "04_NganHang"
+        / str(year)
+        / f"Thang_{int(month):02d}"
+    )
+
+
+def _drive_bank_root_dir(config: dict[str, Any], factory: str) -> Path:
+    factory_no = "2" if _factory(factory) == "factory2" else "1"
+    return Path(config["drive_root_path"]) / f"Xuong{factory_no}" / "04_NganHang"
+
+
 def _cell_has_green_font(cell: Any) -> bool:
     """Return True only for explicit green RGB font colors.
 
@@ -351,13 +367,12 @@ def import_accounts_from_word(
     config = get_cloud_config()
     drive_path = None
     if config.get("drive_backup_enabled"):
-        target_dir = Path(config["drive_root_path"]) / "DuLieuNganHang" / f"{year}-{month:02d}"
+        target_dir = _drive_bank_period_dir(config, factory, month, year)
         target_dir.mkdir(parents=True, exist_ok=True)
         drive_path = target_dir / f"Xuong{2 if factory == 'factory2' else 1}_{year}-{month:02d}_DanhSachTaiKhoan.docx"
         if path.resolve() != drive_path.resolve():
             shutil.copy2(path, drive_path)
-        factory_dir = Path(config["drive_root_path"]) / "DuLieuNganHang" / f"Xuong{2 if factory == 'factory2' else 1}"
-        root_registry = factory_dir / "DanhSachTaiKhoan.json"
+        root_registry = _drive_bank_root_dir(config, factory) / "DanhSachTaiKhoan.json"
         root_registry.parent.mkdir(parents=True, exist_ok=True)
         _atomic_json(root_registry, _registry_for_factory(factory))
 
@@ -585,14 +600,13 @@ def _persist_imported_accounts(
     config = get_cloud_config()
     drive_path = None
     if config.get("drive_backup_enabled"):
-        target_dir = Path(config["drive_root_path"]) / "DuLieuNganHang" / f"{year}-{month:02d}"
+        target_dir = _drive_bank_period_dir(config, factory, month, year)
         target_dir.mkdir(parents=True, exist_ok=True)
         suffix = source_path.suffix.lower() if source_path.suffix.lower() in {".xlsx", ".xlsm"} else ".xlsx"
         drive_path = target_dir / f"Xuong{2 if factory == 'factory2' else 1}_{year}-{month:02d}_DanhSachTaiKhoan{suffix}"
         if source_path.resolve() != drive_path.resolve():
             shutil.copy2(source_path, drive_path)
-        factory_dir = Path(config["drive_root_path"]) / "DuLieuNganHang" / f"Xuong{2 if factory == 'factory2' else 1}"
-        root_registry = factory_dir / "DanhSachTaiKhoan.json"
+        root_registry = _drive_bank_root_dir(config, factory) / "DanhSachTaiKhoan.json"
         root_registry.parent.mkdir(parents=True, exist_ok=True)
         _atomic_json(root_registry, _registry_for_factory(factory))
 
@@ -858,7 +872,7 @@ def backup_registry_to_drive(factory: str = "factory1") -> dict[str, Any]:
     if not REGISTRY_PATH.exists():
         _atomic_json(REGISTRY_PATH, {})
     factory = _factory(factory)
-    target_dir = Path(config["drive_root_path"]) / "DuLieuNganHang" / f"Xuong{2 if factory == 'factory2' else 1}"
+    target_dir = _drive_bank_root_dir(config, factory)
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / "DanhSachTaiKhoan.json"
     _atomic_json(target, _registry_for_factory(factory))
@@ -867,7 +881,7 @@ def backup_registry_to_drive(factory: str = "factory1") -> dict[str, Any]:
 
 def restore_registry_from_drive(factory: str = "factory1") -> dict[str, Any]:
     config = get_cloud_config()
-    bank_dir = Path(config["drive_root_path"]) / "DuLieuNganHang"
+    bank_dir = Path(config["drive_root_path"])
     factory_no = "2" if _factory(factory) == "factory2" else "1"
     word_files = sorted(
         bank_dir.rglob(f"Xuong{factory_no}_*_DanhSachTaiKhoan.docx"),
@@ -889,10 +903,12 @@ def restore_registry_from_drive(factory: str = "factory1") -> dict[str, Any]:
                 "source": "latest_word",
             }
 
-    source = bank_dir / f"Xuong{2 if _factory(factory) == 'factory2' else 1}" / "DanhSachTaiKhoan.json"
+    source = _drive_bank_root_dir(config, factory) / "DanhSachTaiKhoan.json"
     if not source.exists():
         # Backward compatibility with the former shared Drive backup.
-        source = bank_dir / "DanhSachTaiKhoan.json"
+        source = bank_dir / "DuLieuNganHang" / f"Xuong{factory_no}" / "DanhSachTaiKhoan.json"
+    if not source.exists():
+        source = bank_dir / "DuLieuNganHang" / "DanhSachTaiKhoan.json"
     if not source.exists():
         raise ValueError("Không tìm thấy bản sao danh sách tài khoản trên Drive.")
     data = json.loads(source.read_text(encoding="utf-8"))
@@ -913,7 +929,7 @@ def restore_registry_from_drive(factory: str = "factory1") -> dict[str, Any]:
 def bank_status(factory: str = "factory1") -> dict[str, Any]:
     factory = _factory(factory)
     config = get_cloud_config()
-    drive_path = Path(config["drive_root_path"]) / "DuLieuNganHang" / f"Xuong{2 if factory == 'factory2' else 1}" / "DanhSachTaiKhoan.json"
+    drive_path = _drive_bank_root_dir(config, factory) / "DanhSachTaiKhoan.json"
     return {
         "local_count": len(_registry_for_factory(factory)),
         "factory": factory,
@@ -1337,13 +1353,18 @@ def _load_registry_with_drive_fallback(factory: str | None = None) -> dict[str, 
         config = get_cloud_config()
         if not config.get("drive_backup_enabled"):
             return local
-        bank_dir = Path(config["drive_root_path"]) / "DuLieuNganHang"
+        bank_dir = Path(config["drive_root_path"])
         if factory:
             selected = _factory(factory)
-            factory_dir = bank_dir / f"Xuong{2 if selected == 'factory2' else 1}"
-            candidates = [factory_dir / "DanhSachTaiKhoan.json", bank_dir / "DanhSachTaiKhoan.json"]
+            factory_dir = _drive_bank_root_dir(config, selected)
+            legacy_factory_dir = bank_dir / "DuLieuNganHang" / f"Xuong{2 if selected == 'factory2' else 1}"
+            candidates = [
+                factory_dir / "DanhSachTaiKhoan.json",
+                legacy_factory_dir / "DanhSachTaiKhoan.json",
+                bank_dir / "DuLieuNganHang" / "DanhSachTaiKhoan.json",
+            ]
         else:
-            candidates = [bank_dir / "DanhSachTaiKhoan.json"]
+            candidates = [bank_dir / "DuLieuNganHang" / "DanhSachTaiKhoan.json"]
         merged = dict(local)
         for drive_file in candidates:
             if not drive_file.exists():

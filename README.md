@@ -116,12 +116,24 @@ data xuất lương/
         └── 2026/Thang_07/
 ```
 
+Google Drive dùng cùng cây thư mục này từ thư mục backup đã cấu hình:
+
+```text
+AttendanceSystem_Backup/
+├── Xuong1/              01_Output1 ... 08_BanChot_LichSu
+└── Xuong2/              01_Output1 ... 08_BanChot_LichSu
+```
+
+Trong mỗi mục, file được xếp tiếp theo `Năm/Thang_XX`. Bản chốt có thêm mục
+`BanSaoCuoiCung`; danh sách tài khoản gốc nằm trong `04_NganHang` của từng xưởng.
+
 Khi lưu **Bản đang phân tích**, **Bản sao cuối cùng** hoặc sao lưu Excel theo
 kỳ, ứng dụng lưu cả bản Google Drive và bản cục bộ trong cây thư mục đúng xưởng.
 Năm và tháng được tạo tự động từ kỳ đã phân tích, nội dung workbook hoặc tên
 file; file không xác định chắc chắn được kỳ sẽ vào `ChuaXacDinh` thay vì bị xếp
 nhầm theo ngày máy tính. Nếu nâng cấp từ cấu trúc cũ, app tự chuyển file có thể
-xác định được xưởng/kỳ và không ghi đè file đã tồn tại.
+xác định được xưởng/kỳ và không ghi đè file đã tồn tại. Cấu trúc Drive cũ
+(`ExcelDaLuu`, `DuLieuNganHang`) cũng được tự di chuyển khi app khởi động.
 
 ## Dữ liệu không được đưa lên GitHub
 

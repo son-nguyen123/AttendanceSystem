@@ -19,6 +19,16 @@ DB_PATH = STORAGE_DIR / "attendance_history.db"
 HISTORY_DIR = STORAGE_DIR / "history"
 PAYROLL_DATA_PATH = CONFIG_DIR / "payroll_data.json"
 FINAL_COPY_EXTENSIONS = {".xlsx", ".xlsm"}
+DRIVE_EXPORT_FOLDERS = {
+    "output1": "01_Output1",
+    "output2": "02_Output2_BangLuong",
+    "employee_cards": "03_AnhChamCong",
+    "bank": "04_NganHang",
+    "conversion": "05_ChuyenKhung",
+    "mapping": "06_GanDuLieu",
+    "recalculated": "07_TinhLai",
+    "history": "08_BanChot_LichSu",
+}
 
 
 def default_backup_dir() -> str:
@@ -37,7 +47,8 @@ def drive_backup_paths(config: dict[str, Any]) -> dict[str, str]:
     base_dir = Path(str(config.get("drive_backup_dir") or default_backup_dir())).expanduser()
     return {
         "root": str(base_dir),
-        "excel": str(base_dir / "ExcelDaLuu"),
+        "excel": str(base_dir),
+        "legacy_excel": str(base_dir / "ExcelDaLuu"),
         "zip": str(base_dir / "_System_Backup_Zip"),
     }
 
@@ -71,33 +82,106 @@ def create_drive_backup(config: dict[str, Any], reason: str = "manual") -> dict[
     }
 
 
+def migrate_legacy_drive_folders(root: Path | str) -> dict[str, object]:
+    """Move the former Drive layout into the same tree used by local exports.
+
+    The migration is deliberately conservative: it only moves files whose
+    factory and period can be inferred from the old path/name, never replaces
+    an existing file, and leaves unknown files in place for manual review.
+    """
+
+    base = Path(root).expanduser().resolve()
+    if not base.exists():
+        return {"moved": [], "unresolved": [], "failed": [], "removed_folders": []}
+
+    ensure_drive_export_folders(base)
+
+    moved: list[dict[str, str]] = []
+    unresolved: list[str] = []
+    failed: list[dict[str, str]] = []
+    for source in _legacy_drive_files(base):
+        plan = _legacy_drive_destination(base, source)
+        if plan is None:
+            unresolved.append(str(source))
+            continue
+        target_dir, target_name = plan
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = _available_path(target_dir / target_name)
+        try:
+            shutil.move(str(source), str(target))
+            moved.append({"source": str(source), "target": str(target)})
+        except OSError as exc:
+            failed.append({"source": str(source), "target": str(target), "error": str(exc)})
+
+    removed_folders: list[str] = []
+    for legacy_root in (base / "ExcelDaLuu", base / "DuLieuNganHang"):
+        if not legacy_root.exists():
+            continue
+        for directory in sorted(
+            (path for path in legacy_root.rglob("*") if path.is_dir()),
+            key=lambda path: len(path.parts),
+            reverse=True,
+        ):
+            try:
+                directory.rmdir()
+                removed_folders.append(str(directory))
+            except OSError:
+                pass
+        try:
+            legacy_root.rmdir()
+            removed_folders.append(str(legacy_root))
+        except OSError:
+            pass
+
+    repaired = _repair_drive_category_misclassifications(base)
+    moved.extend(repaired["moved"])
+    failed.extend(repaired["failed"])
+
+    return {
+        "moved": moved,
+        "unresolved": unresolved,
+        "failed": failed,
+        "removed_folders": removed_folders,
+    }
+
+
+def ensure_drive_export_folders(root: Path | str) -> dict[str, Path]:
+    base = Path(root).expanduser().resolve()
+    base.mkdir(parents=True, exist_ok=True)
+    result: dict[str, Path] = {}
+    for factory in ("factory1", "factory2"):
+        for category, folder in DRIVE_EXPORT_FOLDERS.items():
+            path = base / _factory_folder_name(factory) / folder
+            path.mkdir(parents=True, exist_ok=True)
+            result[f"{factory}:{category}"] = path
+    return result
+
+
 def create_period_excel_backup(config: dict[str, Any], detail: dict[str, Any], reason: str = "save_history") -> dict[str, Any]:
     period = detail.get("period") or {}
     factory = _normalize_factory(period.get("factory"))
     base_dir = Path(str(config.get("drive_backup_dir") or default_backup_dir())).expanduser()
-    target_dir = _period_month_dir(
-        base_dir,
-        factory,
-        _period_month_int(period),
-        _period_year_int(period),
-    )
+    month = _period_month_int(period)
+    year = _period_year_int(period)
+    target_dir = _drive_category_period_dir(base_dir, factory, "history", month, year)
     target_dir.mkdir(parents=True, exist_ok=True)
     final_dir = _ensure_final_copy_folder(
         target_dir,
-        _period_month_int(period),
-        _period_year_int(period),
+        month,
+        year,
     )
 
     copied = []
-    for key, filename in (
-        ("source_path", "00_file_goc.xlsx"),
-        ("output1_path", "01_output_1_cham_cong.xlsx"),
-        ("output2_path", "02_output_2_luong_rieng.xlsx"),
+    for key, category, filename in (
+        ("source_path", "history", "00_file_goc.xlsx"),
+        ("output1_path", "output1", "01_output_1_cham_cong.xlsx"),
+        ("output2_path", "output2", "02_output_2_luong_rieng.xlsx"),
     ):
         source = Path(str(period.get(key) or ""))
         if not source.exists() or not source.is_file():
             continue
-        target = target_dir / filename
+        target = _drive_category_period_dir(base_dir, factory, category, month, year) / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
         copied.append(str(target))
 
@@ -142,7 +226,7 @@ def create_analysis_excel_copy(
 ) -> dict[str, Any]:
     factory = _normalize_factory(factory)
     base_dir = Path(str(config.get("drive_backup_dir") or default_backup_dir())).expanduser()
-    target_dir = _period_month_dir(base_dir, factory, month, year)
+    target_dir = _drive_category_period_dir(base_dir, factory, "history", month, year)
     target_dir.mkdir(parents=True, exist_ok=True)
     final_dir = _ensure_final_copy_folder(target_dir, month, year)
 
@@ -199,7 +283,7 @@ def list_analysis_excel_copies(
     """List temporary machine copies for one month, newest first."""
     factory = _normalize_factory(factory)
     base_dir = Path(str(config.get("drive_backup_dir") or default_backup_dir())).expanduser()
-    target_dirs = _period_dir_candidates(base_dir, factory, month, year)
+    target_dirs = _analysis_period_dir_candidates(base_dir, factory, month, year)
     copies: list[dict[str, Any]] = []
     for target_dir in target_dirs:
         if not target_dir.exists():
@@ -238,7 +322,7 @@ def create_final_excel_copy(
 ) -> dict[str, Any]:
     factory = _normalize_factory(factory)
     base_dir = Path(str(config.get("drive_backup_dir") or default_backup_dir())).expanduser()
-    period_dir = _period_month_dir(base_dir, factory, month, year)
+    period_dir = _drive_category_period_dir(base_dir, factory, "history", month, year)
     period_dir.mkdir(parents=True, exist_ok=True)
     target_dir = _ensure_final_copy_folder(period_dir, month, year)
 
@@ -407,9 +491,9 @@ def delete_drive_machine_files(
         raise ValueError("Thang/nam khong hop le")
 
     base_dir = Path(str(config.get("drive_backup_dir") or default_backup_dir())).expanduser()
-    excel_dir = (base_dir / "ExcelDaLuu").resolve()
+    excel_dir = base_dir.resolve()
     normalized_factory = _normalize_factory(factory)
-    candidates = _period_dir_candidates(base_dir, normalized_factory, month, year)
+    candidates = _machine_period_dir_candidates(base_dir, normalized_factory, month, year)
 
     deleted_paths: list[str] = []
     errors: list[dict[str, str]] = []
@@ -455,9 +539,9 @@ def delete_drive_period_files(
         raise ValueError("Thang/nam khong hop le")
 
     base_dir = Path(str(config.get("drive_backup_dir") or default_backup_dir())).expanduser()
-    excel_dir = (base_dir / "ExcelDaLuu").resolve()
+    excel_dir = base_dir.resolve()
     normalized_factory = _normalize_factory(factory)
-    candidates = _period_dir_candidates(base_dir, normalized_factory, month, year)
+    candidates = _all_period_dir_candidates(base_dir, normalized_factory, month, year)
 
     deleted_paths: list[str] = []
     errors: list[dict[str, str]] = []
@@ -529,41 +613,66 @@ def _factory_folder_name(factory: str) -> str:
 
 
 def _excel_factory_dir(base_dir: Path, factory: str) -> Path:
-    return base_dir / "ExcelDaLuu" / _factory_folder_name(factory)
+    return base_dir / _factory_folder_name(factory)
 
 
 def _period_month_dir(base_dir: Path, factory: str, month: int, year: int) -> Path:
     return _excel_factory_dir(base_dir, factory) / str(year) / _month_folder_name(month)
 
 
-def _period_dir_candidates(base_dir: Path, factory: str, month: int, year: int) -> list[Path]:
-    """Return the new nested folder first, followed by legacy layouts."""
+def _drive_category_dir(base_dir: Path, factory: str, category: str) -> Path:
+    folder = DRIVE_EXPORT_FOLDERS.get(category, DRIVE_EXPORT_FOLDERS["history"])
+    return base_dir / _factory_folder_name(factory) / folder
 
+
+def _drive_category_period_dir(base_dir: Path, factory: str, category: str, month: int, year: int) -> Path:
+    return _drive_category_dir(base_dir, factory, category) / str(year) / _month_folder_name(month)
+
+
+def _analysis_period_dir_candidates(base_dir: Path, factory: str, month: int, year: int) -> list[Path]:
     normalized_factory = _normalize_factory(factory)
-    excel_dir = base_dir / "ExcelDaLuu"
-    factory_dir = excel_dir / _factory_folder_name(normalized_factory)
-    candidates = [
-        _period_month_dir(base_dir, normalized_factory, month, year),
-        factory_dir / _period_month_folder_name(month, year),
+    return [
+        _drive_category_period_dir(base_dir, normalized_factory, "history", month, year),
+        base_dir / "ExcelDaLuu" / _factory_folder_name(normalized_factory) / str(year) / _month_folder_name(month),
+        base_dir / "ExcelDaLuu" / _factory_folder_name(normalized_factory) / _period_month_folder_name(month, year),
+        base_dir / "ExcelDaLuu" / _period_month_folder_name(month, year),
     ]
-    if normalized_factory == "factory1":
-        candidates.append(excel_dir / _period_month_folder_name(month, year))
+
+
+def _machine_period_dir_candidates(base_dir: Path, factory: str, month: int, year: int) -> list[Path]:
+    return [
+        _drive_category_period_dir(base_dir, factory, "output1", month, year),
+        _drive_category_period_dir(base_dir, factory, "output2", month, year),
+        _drive_category_period_dir(base_dir, factory, "history", month, year),
+        *_analysis_period_dir_candidates(base_dir, factory, month, year)[1:],
+    ]
+
+
+def _all_period_dir_candidates(base_dir: Path, factory: str, month: int, year: int) -> list[Path]:
+    candidates = [
+        _drive_category_period_dir(base_dir, factory, category, month, year)
+        for category in DRIVE_EXPORT_FOLDERS
+    ]
+    candidates.extend(_machine_period_dir_candidates(base_dir, factory, month, year)[3:])
     return candidates
 
 
 def _iter_final_copy_dirs(excel_dir: Path, factory: str | None):
     if factory:
-        yield from (excel_dir / _factory_folder_name(factory)).glob("*/Thang_*/BanSaoCuoiCung")
-        yield from (excel_dir / _factory_folder_name(factory)).glob("*/BanSaoCuoiCung")
+        yield from (excel_dir / _factory_folder_name(factory) / DRIVE_EXPORT_FOLDERS["history"]).glob("*/Thang_*/BanSaoCuoiCung")
+        yield from (excel_dir / "ExcelDaLuu" / _factory_folder_name(factory)).glob("*/Thang_*/BanSaoCuoiCung")
+        yield from (excel_dir / "ExcelDaLuu" / _factory_folder_name(factory)).glob("*/BanSaoCuoiCung")
         if factory == "factory1":
-            yield from excel_dir.glob("*/BanSaoCuoiCung")
+            yield from (excel_dir / "ExcelDaLuu").glob("*/BanSaoCuoiCung")
         return
 
-    yield from excel_dir.glob("Xuong1/*/Thang_*/BanSaoCuoiCung")
-    yield from excel_dir.glob("Xuong2/*/Thang_*/BanSaoCuoiCung")
-    yield from excel_dir.glob("Xuong1/*/BanSaoCuoiCung")
-    yield from excel_dir.glob("Xuong2/*/BanSaoCuoiCung")
-    yield from excel_dir.glob("*/BanSaoCuoiCung")
+    yield from excel_dir.glob("Xuong1/08_BanChot_LichSu/*/Thang_*/BanSaoCuoiCung")
+    yield from excel_dir.glob("Xuong2/08_BanChot_LichSu/*/Thang_*/BanSaoCuoiCung")
+    yield from excel_dir.glob("ExcelDaLuu/Xuong1/*/Thang_*/BanSaoCuoiCung")
+    yield from excel_dir.glob("ExcelDaLuu/Xuong2/*/Thang_*/BanSaoCuoiCung")
+    yield from excel_dir.glob("ExcelDaLuu/Xuong1/*/BanSaoCuoiCung")
+    yield from excel_dir.glob("ExcelDaLuu/Xuong2/*/BanSaoCuoiCung")
+    yield from excel_dir.glob("ExcelDaLuu/*/BanSaoCuoiCung")
 
 
 def _is_eligible_final_copy(path: Path, factory: str) -> bool:
@@ -583,8 +692,8 @@ def _factory_from_final_dir(excel_dir: Path, final_dir: Path) -> str:
         relative = final_dir.relative_to(excel_dir)
     except ValueError:
         return "factory1"
-    first = relative.parts[0] if relative.parts else ""
-    if first == "Xuong2":
+    parts = relative.parts
+    if "Xuong2" in parts[:2]:
         return "factory2"
     return "factory1"
 
@@ -679,3 +788,134 @@ def _safe_filename(value: str) -> str:
     path = Path(value).name
     cleaned = "".join(char if char.isalnum() or char in " ._-" else "_" for char in path).strip()
     return cleaned or "file_chot.xlsx"
+
+
+def _legacy_drive_files(base: Path) -> list[Path]:
+    files: list[Path] = []
+    for legacy_root in (base / "ExcelDaLuu", base / "DuLieuNganHang"):
+        if not legacy_root.is_dir():
+            continue
+        files.extend(path for path in legacy_root.rglob("*") if path.is_file())
+    return sorted(files, key=lambda path: str(path).casefold())
+
+
+def _legacy_drive_destination(base: Path, source: Path) -> tuple[Path, str] | None:
+    try:
+        relative = source.relative_to(base)
+    except ValueError:
+        return None
+    parts = list(relative.parts)
+    if not parts:
+        return None
+
+    if parts[0] == "ExcelDaLuu":
+        factory = _factory_from_legacy_parts(parts)
+        period = _period_from_legacy_parts(parts)
+        if not factory or not period:
+            return None
+        category = _category_from_legacy_excel_parts(parts)
+        if not category:
+            return None
+        year, month = period
+        target_dir = _drive_category_period_dir(base, factory, category, month, year)
+        if "BanSaoCuoiCung" in parts:
+            target_dir = target_dir / "BanSaoCuoiCung"
+        return target_dir, source.name
+
+    if parts[0] == "DuLieuNganHang":
+        factory = _factory_from_legacy_parts(parts)
+        if not factory:
+            return None
+        if source.suffix.lower() == ".json" and source.name.casefold() == "danhsachtaikhoan.json":
+            return _drive_category_dir(base, factory, "bank"), source.name
+        period = _period_from_legacy_parts(parts)
+        if not period:
+            return None
+        year, month = period
+        return _drive_category_period_dir(base, factory, "bank", month, year), source.name
+    return None
+
+
+def _factory_from_legacy_parts(parts: list[str]) -> str | None:
+    normalized = [part.replace(" ", "").casefold() for part in parts]
+    if any("xuong2" in part for part in normalized):
+        return "factory2"
+    if any("xuong1" in part for part in normalized):
+        return "factory1"
+    if parts and parts[0] == "ExcelDaLuu":
+        # The old shared Excel folder represented factory 1 by default.
+        return "factory1"
+    return None
+
+
+def _period_from_legacy_parts(parts: list[str]) -> tuple[int, int] | None:
+    for index, part in enumerate(parts):
+        period = _period_from_month_folder(part)
+        if period:
+            return period
+        month_folder = re.fullmatch(r"Thang_(\d{1,2})", part, re.IGNORECASE)
+        if month_folder and index > 0 and re.fullmatch(r"20\d{2}", parts[index - 1]):
+            month = int(month_folder.group(1))
+            if 1 <= month <= 12:
+                return int(parts[index - 1]), month
+        match = re.search(r"(?<!\d)(20\d{2})[-_.](\d{1,2})(?!\d)", part)
+        if match:
+            year, month = int(match.group(1)), int(match.group(2))
+            if 1 <= month <= 12:
+                return year, month
+    return None
+
+
+def _category_from_legacy_excel_parts(parts: list[str]) -> str | None:
+    name = parts[-1].casefold()
+    if "banchot" in name or "bansao" in [part.casefold() for part in parts]:
+        return "history"
+    if "01_output_1" in name or "output1" in name:
+        return "output1"
+    if "02_output_2" in name or "output2" in name:
+        return "output2"
+    if "bandangphantich" in name:
+        return "history"
+    if name in {"00_file_goc.xlsx", "00_file_goc.xlsm", "readme.txt"}:
+        return "history"
+    return "history" if "BanSaoCuoiCung" in parts else None
+
+
+def _repair_drive_category_misclassifications(base: Path) -> dict[str, list[dict[str, str]]]:
+    moved: list[dict[str, str]] = []
+    failed: list[dict[str, str]] = []
+    for factory in ("factory1", "factory2"):
+        for category in ("output1", "output2"):
+            source_root = _drive_category_dir(base, factory, category)
+            if not source_root.is_dir():
+                continue
+            for source in sorted(source_root.rglob("*"), key=lambda path: str(path).casefold()):
+                if not source.is_file() or "BanSaoCuoiCung" not in source.parts:
+                    continue
+                try:
+                    relative_parts = source.relative_to(base).parts
+                except ValueError:
+                    continue
+                period = _period_from_legacy_parts(list(relative_parts))
+                if not period:
+                    continue
+                year, month = period
+                target_dir = _drive_category_period_dir(base, factory, "history", month, year) / "BanSaoCuoiCung"
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target = _available_path(target_dir / source.name)
+                try:
+                    shutil.move(str(source), str(target))
+                    moved.append({"source": str(source), "target": str(target)})
+                except OSError as exc:
+                    failed.append({"source": str(source), "target": str(target), "error": str(exc)})
+    return {"moved": moved, "failed": failed}
+
+
+def _available_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    for index in range(2, 10000):
+        candidate = path.with_name(f"{path.stem} ({index}){path.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise ValueError(f"Khong tao duoc ten file moi trong thu muc: {path.parent}")
