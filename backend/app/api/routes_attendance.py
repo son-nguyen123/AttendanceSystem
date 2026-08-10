@@ -14,7 +14,7 @@ from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 
 from app.api.auth_dependencies import ROLE_LOGIN_ENABLED, LOCAL_OWNER_USER, require_staff_or_owner
-from app.services.cloud_sync import submit_attendance_to_owner
+from app.services.cloud_sync import save_local_export_copy, submit_attendance_to_owner
 from app.services.data_mapper import inspect_bank_accounts_for_mapping, map_owner_data_to_current_workbook
 from app.services.bank_payroll import backup_registry_to_drive
 from app.services.bank_payroll import save_accounts
@@ -28,6 +28,7 @@ from app.services.period_detector import detect_period_from_workbook
 from app.services.workbook_processor import analyze_workbook, export_processed_workbook
 from app.services.workbook_recalculator import recalculate_workbook_totals
 from app.services.workbook_normalizer import inspect_workbook_layout, normalize_raw_attendance_workbook
+from app.services.excel_compat import is_supported_excel_suffix, prepare_excel_for_openpyxl
 from app.services.workbook_guard import (
     WorkbookRole,
     inspect_workbook_for_role,
@@ -212,14 +213,15 @@ async def inspect_attendance_file(
     user: dict = Depends(require_staff_or_owner),
 ) -> dict:
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".xlsx", ".xlsm"}:
-        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xlsx hoặc .xlsm")
+    if not is_supported_excel_suffix(suffix):
+        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xls, .xlsx hoặc .xlsm")
 
     try:
         with TemporaryDirectory(dir=STORAGE_DIR) as temp_dir:
             uploaded_path = Path(temp_dir) / f"inspect{suffix}"
             uploaded_path.write_bytes(await file.read())
-            profile = inspect_workbook_for_role(uploaded_path, role, factory=factory)
+            readable_path = prepare_excel_for_openpyxl(uploaded_path, Path(temp_dir))
+            profile = inspect_workbook_for_role(readable_path, role, factory=factory)
             return profile.to_dict()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -245,8 +247,8 @@ async def analyze_attendance(
     user: dict = Depends(require_staff_or_owner),
 ) -> dict:
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".xlsx", ".xlsm"}:
-        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xlsx hoặc .xlsm")
+    if not is_supported_excel_suffix(suffix):
+        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xls, .xlsx hoặc .xlsm")
 
     session_id = uuid4().hex
     session_dir = STORAGE_DIR / session_id
@@ -257,12 +259,13 @@ async def analyze_attendance(
     staging_manager = TemporaryDirectory(dir=STORAGE_DIR, prefix=f".attendance-analyze-{session_id}-")
     staging_dir = Path(staging_manager.name)
     uploaded_path = staging_dir / f"uploaded{suffix}"
-    original_path = staging_dir / f"original{suffix}"
+    original_path = staging_dir / f"original{'.xlsx' if suffix == '.xls' else suffix}"
 
     try:
         # Keep uploads in a staging directory until validation and analysis
         # finish. Failed workbooks must never become restorable sessions.
         uploaded_path.write_bytes(await file.read())
+        readable_path = prepare_excel_for_openpyxl(uploaded_path, staging_dir)
         (staging_dir / "metadata.json").write_text(
             json.dumps({"filename": file.filename, "normalized_raw": False, "factory": factory}, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -270,10 +273,10 @@ async def analyze_attendance(
         _raise_if_analysis_cancelled(request_id)
 
         if smart_scan:
-            await asyncio.to_thread(inspect_workbook_for_role, uploaded_path, "analysis", factory=factory)
+            await asyncio.to_thread(inspect_workbook_for_role, readable_path, "analysis", factory=factory)
         _raise_if_analysis_cancelled(request_id)
         if factory == "factory2":
-            shutil.copy2(uploaded_path, original_path)
+            shutil.copy2(readable_path, original_path)
             result = await asyncio.to_thread(analyze_factory2_workbook, original_path)
             _raise_if_analysis_cancelled(request_id)
             summary = result.get("summary") or {}
@@ -291,7 +294,7 @@ async def analyze_attendance(
             }
 
         if factory != "factory2":
-            layout = await asyncio.to_thread(inspect_workbook_layout, uploaded_path)
+            layout = await asyncio.to_thread(inspect_workbook_layout, readable_path)
             _raise_if_analysis_cancelled(request_id)
             if layout.requires_normalization and not normalize_raw:
                 pending_dir = _pending_analysis_path(session_id)
@@ -329,7 +332,7 @@ async def analyze_attendance(
                 }
 
             if layout.requires_normalization:
-                await asyncio.to_thread(normalize_raw_attendance_workbook, uploaded_path, original_path)
+                await asyncio.to_thread(normalize_raw_attendance_workbook, readable_path, original_path)
                 _raise_if_analysis_cancelled(request_id)
                 normalized_raw = True
                 (staging_dir / "metadata.json").write_text(
@@ -337,7 +340,7 @@ async def analyze_attendance(
                     encoding="utf-8",
                 )
             else:
-                shutil.copy2(uploaded_path, original_path)
+                shutil.copy2(readable_path, original_path)
 
             result = await asyncio.to_thread(analyze_workbook, original_path)
             _raise_if_analysis_cancelled(request_id)
@@ -400,11 +403,12 @@ async def continue_attendance_analysis(
         if len(uploaded_paths) != 1:
             raise ValueError("Không tìm thấy file đã tải lên")
         uploaded_path = uploaded_paths[0]
-        original_path = pending_dir / f"original{uploaded_path.suffix.lower()}"
+        readable_path = prepare_excel_for_openpyxl(uploaded_path, pending_dir)
+        original_path = pending_dir / f"original{'.xlsx' if uploaded_path.suffix.lower() == '.xls' else uploaded_path.suffix.lower()}"
         layout = metadata.get("layout") or {}
 
         _raise_if_analysis_cancelled(request_id)
-        await asyncio.to_thread(normalize_raw_attendance_workbook, uploaded_path, original_path)
+        await asyncio.to_thread(normalize_raw_attendance_workbook, readable_path, original_path)
         _raise_if_analysis_cancelled(request_id)
         result = await asyncio.to_thread(analyze_workbook, original_path)
         _raise_if_analysis_cancelled(request_id)
@@ -465,29 +469,30 @@ async def convert_factory2_legacy_workbook(
     user: dict = Depends(require_staff_or_owner),
 ) -> FileResponse:
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".xlsx", ".xlsm"}:
-        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xlsx hoặc .xlsm")
+    if not is_supported_excel_suffix(suffix):
+        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xls, .xlsx hoặc .xlsm")
 
     conversion_dir = STORAGE_DIR / f"factory2-convert-{uuid4().hex}"
     conversion_dir.mkdir(parents=True, exist_ok=True)
     source_path = conversion_dir / f"legacy{suffix}"
     output_path = conversion_dir / f"Xuong2_{output_kind.upper()}_KhungMoi.xlsx"
     source_path.write_bytes(await file.read())
+    readable_path = prepare_excel_for_openpyxl(source_path, conversion_dir)
 
     try:
-        analysis = analyze_factory2_workbook(source_path)
+        analysis = analyze_factory2_workbook(readable_path)
         if not analysis.get("summary", {}).get("blocks"):
             raise ValueError("Không tìm thấy nhân viên có giờ chấm trong bảng dọc Xưởng 2")
         if output_kind == "output2":
             export_factory2_output2(
-                source_path,
+                readable_path,
                 output_path,
                 include_saved_data=True,
                 factory="factory2",
                 carry_source_payroll_data=True,
             )
         else:
-            export_factory2_output1(source_path, output_path, factory="factory2")
+            export_factory2_output1(readable_path, output_path, factory="factory2")
     except Exception as exc:
         shutil.rmtree(conversion_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=f"Không chuyển được bảng Xưởng 2: {exc}") from exc
@@ -496,6 +501,7 @@ async def convert_factory2_legacy_workbook(
     month = int(period.get("month") or 0)
     year = int(period.get("year") or 0)
     period_label = f"{year}-{month:02d}" if month and year else "KhongRoKy"
+    save_local_export_copy(output_path, "legacy", f"Xuong2_{period_label}_{'Output2_KhungMoi' if output_kind == 'output2' else 'Output1'}.xlsx")
     return FileResponse(
         output_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -533,6 +539,7 @@ async def convert_factory1_legacy_workbook(
         headers["X-Period-Month"] = str(period["month"])
     if period.get("year"):
         headers["X-Period-Year"] = str(period["year"])
+    save_local_export_copy(output_path, "legacy", "Xuong1_Output2_KhungMoi.xlsx")
     return FileResponse(
         output_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -559,6 +566,7 @@ def export_attendance(session_id: str, user: dict = Depends(require_staff_or_own
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Không xuất được file Excel: {exc}") from exc
 
+    save_local_export_copy(output_path, "output1", "Output1.xlsx")
     return FileResponse(
         output_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -636,22 +644,25 @@ async def recalculate_attendance_totals(
         raise HTTPException(status_code=403, detail="Tài khoản nhân viên không được xuất Output 2")
 
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".xlsx", ".xlsm"}:
-        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xlsx hoặc .xlsm")
+    if not is_supported_excel_suffix(suffix):
+        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xls, .xlsx hoặc .xlsm")
 
     session_id = uuid4().hex
     session_dir = STORAGE_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
     uploaded_path = session_dir / f"edited{suffix}"
-    recalc_path = session_dir / f"attendance_recalculated_output1{suffix}"
-    output_path = session_dir / f"attendance_recalculated_{output_kind}{suffix}"
+    readable_path = session_dir / f"edited_readable{'.xlsx' if suffix == '.xls' else suffix}"
+    recalc_suffix = ".xlsx" if suffix == ".xls" else suffix
+    recalc_path = session_dir / f"attendance_recalculated_output1{recalc_suffix}"
+    output_path = session_dir / f"attendance_recalculated_{output_kind}{recalc_suffix}"
     uploaded_path.write_bytes(await file.read())
+    readable_path = prepare_excel_for_openpyxl(uploaded_path, session_dir)
 
     try:
         if smart_scan:
             guard_role: WorkbookRole = "recalculate_output2" if output_kind == "output2" else "recalculate_output1"
-            inspect_workbook_for_role(uploaded_path, guard_role)
-        recalculate_workbook_totals(uploaded_path, recalc_path)
+            inspect_workbook_for_role(readable_path, guard_role)
+        recalculate_workbook_totals(readable_path, recalc_path)
         if output_kind == "output2":
             profile_sync = sync_latest_final_copy_profile(recalc_path, factory)
             profile_codes = {
@@ -664,6 +675,7 @@ async def recalculate_attendance_totals(
             )
         elif recalc_path != output_path:
             shutil.copy2(recalc_path, output_path)
+        save_local_export_copy(output_path, "recalculate", output_path.name)
     except Exception as exc:
         shutil.rmtree(session_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=f"Không tính lại tổng công được: {exc}") from exc
@@ -671,7 +683,7 @@ async def recalculate_attendance_totals(
     return FileResponse(
         output_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename=f"attendance_recalculated_{output_kind}{suffix}",
+        filename=f"attendance_recalculated_{output_kind}{recalc_suffix}",
     )
 
 
@@ -688,23 +700,26 @@ async def map_owner_data(
 ) -> FileResponse:
     current_suffix = Path(current_file.filename or "").suffix.lower()
     previous_suffix = Path(previous_file.filename or "").suffix.lower()
-    if current_suffix not in {".xlsx", ".xlsm"} or previous_suffix not in {".xlsx", ".xlsm"}:
-        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xlsx hoặc .xlsm")
+    if not is_supported_excel_suffix(current_suffix) or not is_supported_excel_suffix(previous_suffix):
+        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xls, .xlsx hoặc .xlsm")
 
     session_id = uuid4().hex
     session_dir = STORAGE_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
     current_path = session_dir / f"current{current_suffix}"
     previous_path = session_dir / f"previous{previous_suffix}"
-    output1_path = session_dir / f"attendance_mapped_output1{current_suffix}"
-    output2_path = session_dir / f"attendance_mapped_output2{current_suffix}"
+    mapped_suffix = ".xlsx" if current_suffix == ".xls" else current_suffix
+    output1_path = session_dir / f"attendance_mapped_output1{mapped_suffix}"
+    output2_path = session_dir / f"attendance_mapped_output2{mapped_suffix}"
     zip_path = session_dir / "attendance_mapped_outputs.zip"
     current_path.write_bytes(await current_file.read())
     previous_path.write_bytes(await previous_file.read())
+    current_readable_path = prepare_excel_for_openpyxl(current_path, session_dir)
+    previous_readable_path = prepare_excel_for_openpyxl(previous_path, session_dir)
 
     try:
         if smart_scan:
-            validate_mapping_pair(current_path, previous_path, factory=factory)
+            validate_mapping_pair(current_readable_path, previous_readable_path, factory=factory)
         try:
             requested_bank_updates = json.loads(bank_updates or "[]")
         except json.JSONDecodeError as exc:
@@ -713,8 +728,8 @@ async def map_owner_data(
             raise HTTPException(status_code=400, detail="Dữ liệu cập nhật tài khoản phải là danh sách")
 
         bank_preflight = inspect_bank_accounts_for_mapping(
-            current_path,
-            previous_path,
+            current_readable_path,
+            previous_readable_path,
             factory=factory,
             smart_mapping=smart_mapping,
         )
@@ -759,8 +774,8 @@ async def map_owner_data(
             except Exception:
                 bank_backup_status = "local_only"
         summary = map_owner_data_to_current_workbook(
-            current_path,
-            previous_path,
+            current_readable_path,
+            previous_readable_path,
             output2_path,
             mode="output2",
             smart_mapping=smart_mapping,
@@ -774,8 +789,8 @@ async def map_owner_data(
             "allow_missing_bank_accounts": allow_missing_bank_accounts,
         })
         map_owner_data_to_current_workbook(
-            current_path,
-            previous_path,
+            current_readable_path,
+            previous_readable_path,
             output1_path,
             mode="output1",
             smart_mapping=smart_mapping,
@@ -789,9 +804,10 @@ async def map_owner_data(
         raise HTTPException(status_code=400, detail=f"Không gán được dữ liệu: {exc}") from exc
 
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.write(output1_path, arcname=f"Output1{current_suffix}")
-        archive.write(output2_path, arcname=f"Output2{current_suffix}")
+        archive.write(output1_path, arcname=f"Output1{mapped_suffix}")
+        archive.write(output2_path, arcname=f"Output2{mapped_suffix}")
 
+    save_local_export_copy(zip_path, "mapping", "Output1_Output2.zip")
     return FileResponse(
         zip_path,
         media_type="application/zip",
@@ -812,8 +828,8 @@ async def inspect_map_owner_data(
     """Preview mapping and bank-account gaps before generating Output files."""
     current_suffix = Path(current_file.filename or "").suffix.lower()
     previous_suffix = Path(previous_file.filename or "").suffix.lower()
-    if current_suffix not in {".xlsx", ".xlsm"} or previous_suffix not in {".xlsx", ".xlsm"}:
-        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xlsx hoặc .xlsm")
+    if not is_supported_excel_suffix(current_suffix) or not is_supported_excel_suffix(previous_suffix):
+        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xls, .xlsx hoặc .xlsm")
 
     session_id = uuid4().hex
     session_dir = STORAGE_DIR / session_id
@@ -822,12 +838,14 @@ async def inspect_map_owner_data(
     previous_path = session_dir / f"previous{previous_suffix}"
     current_path.write_bytes(await current_file.read())
     previous_path.write_bytes(await previous_file.read())
+    current_readable_path = prepare_excel_for_openpyxl(current_path, session_dir)
+    previous_readable_path = prepare_excel_for_openpyxl(previous_path, session_dir)
     try:
         if smart_scan:
-            validate_mapping_pair(current_path, previous_path, factory=factory)
+            validate_mapping_pair(current_readable_path, previous_readable_path, factory=factory)
         result = inspect_bank_accounts_for_mapping(
-            current_path,
-            previous_path,
+            current_readable_path,
+            previous_readable_path,
             factory=factory,
             smart_mapping=smart_mapping,
         )
@@ -868,6 +886,7 @@ def export_attendance_with_overrides(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"KhÃ´ng xuáº¥t Ä‘Æ°á»£c file Excel: {exc}") from exc
 
+    save_local_export_copy(output_path, "output1", "Output1.xlsx")
     return FileResponse(
         output_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1036,6 +1055,7 @@ def _prepare_employee_cards_zip(request: EmployeeCardsExportRequest) -> Path:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Không xuất được phiếu nhân viên: {exc}") from exc
 
+    save_local_export_copy(output_path, "employee_cards", _employee_cards_download_filename(request.session_id, request.kind))
     return output_path
 
 

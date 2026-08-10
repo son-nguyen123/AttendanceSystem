@@ -70,6 +70,79 @@ class BankPayrollScannerTests(unittest.TestCase):
             self.assertEqual(result["employees"][0]["account_number"], "5601884980")
             self.assertEqual(result["employees"][0]["salary"], 3_000_000)
 
+    def test_export_can_skip_or_keep_missing_bank_accounts(self) -> None:
+        with TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            source = root / "output2.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            headers = {
+                34: "Ma",
+                35: "Ten nhan vien",
+                36: "Muc luong",
+                39: "So Ngay Di Lam",
+                44: "Luong Thang 6/2026",
+            }
+            for column, value in headers.items():
+                sheet.cell(4, column).value = value
+            sheet.cell(9, 34).value = "1006"
+            sheet.cell(9, 35).value = "Alice"
+            sheet.cell(9, 39).value = 20
+            sheet.cell(9, 44).value = 3_000_000
+            for column, value in headers.items():
+                sheet.cell(13, column).value = value
+            sheet.cell(18, 34).value = "1007"
+            sheet.cell(18, 35).value = "Bob"
+            sheet.cell(18, 39).value = 20
+            sheet.cell(18, 44).value = 2_000_000
+            workbook.save(source)
+            workbook.close()
+
+            original_registry_path = bank_payroll.REGISTRY_PATH
+            original_session_dir = bank_payroll.SESSION_DIR
+            bank_payroll.REGISTRY_PATH = root / "bank_accounts.json"
+            bank_payroll.SESSION_DIR = root / "bank_payroll"
+            bank_payroll.REGISTRY_PATH.write_text(
+                json.dumps({
+                    "factory1:1006": {
+                        "factory": "factory1",
+                        "employee_code": "1006",
+                        "account_number": "5601884980",
+                    },
+                }),
+                encoding="utf-8",
+            )
+            try:
+                scan = bank_payroll.scan_official_workbook(source, "factory1")
+                snapshot_path = bank_payroll.SESSION_DIR / f"{scan['scan_id']}.json"
+                snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                snapshot["employees"][1]["account_number"] = ""
+                snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+                bank_payroll.REGISTRY_PATH.write_text(
+                    json.dumps({
+                        "factory1:1006": {
+                            "factory": "factory1",
+                            "employee_code": "1006",
+                            "account_number": "5601884980",
+                        },
+                    }),
+                    encoding="utf-8",
+                )
+                with self.assertRaises(ValueError):
+                    bank_payroll.export_bank_excel(scan["scan_id"])
+                only_path, _ = bank_payroll.export_bank_excel(scan["scan_id"], missing_bank_policy="only_with_account")
+                only_sheet = load_workbook(only_path, data_only=True).active
+                blank_path, _ = bank_payroll.export_bank_excel(scan["scan_id"], missing_bank_policy="include_blank")
+            finally:
+                bank_payroll.REGISTRY_PATH = original_registry_path
+                bank_payroll.SESSION_DIR = original_session_dir
+
+            blank_sheet = load_workbook(blank_path, data_only=True).active
+            self.assertEqual(only_sheet.max_row, 5)
+            self.assertEqual(blank_sheet.max_row, 6)
+            self.assertEqual(blank_sheet["B5"].value, "1007")
+            self.assertEqual(blank_sheet["D5"].value, None)
+
 
 class BankAccountMappingLayoutTests(unittest.TestCase):
     def test_output2_account_is_not_written_into_code_column(self) -> None:

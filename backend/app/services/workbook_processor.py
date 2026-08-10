@@ -103,6 +103,7 @@ def export_processed_workbook(
     output_path: Path,
     review_overrides: list[dict] | None = None,
     factory: str = "factory1",
+    overtime_overrides: dict[str, dict[int, int | float]] | None = None,
 ) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_path, output_path)
@@ -111,6 +112,7 @@ def export_processed_workbook(
     ws = _select_attendance_sheet(wb)
     blocks = detect_employee_blocks(ws)
     overrides = _review_overrides_by_employee_day(review_overrides or [])
+    overtime_by_employee = overtime_overrides or {}
     _apply_sunday_column_fills(ws, blocks)
 
     for block in blocks:
@@ -132,6 +134,22 @@ def export_processed_workbook(
             ws.cell(row=block.result_row, column=item.column).value = (
                 work_value if work_value is not None and work_value != "" else None
             )
+
+        # Legacy Factory 1 stores overtime in the row immediately below the
+        # daily work row.  Reapply it by the calendar-day label, not by a
+        # fixed column/row such as day 31, so a month with fewer days keeps
+        # each overtime value under its matching day in the new frame.
+        daily_overtime = overtime_by_employee.get(block.employee_code, {})
+        for column in range(1, 32):
+            day = ws.cell(row=block.day_row, column=column).value
+            if isinstance(day, bool):
+                continue
+            if isinstance(day, float) and day.is_integer():
+                day = int(day)
+            if not isinstance(day, int) or not 1 <= day <= 31:
+                continue
+            if day in daily_overtime:
+                ws.cell(row=block.result_row + 1, column=column).value = daily_overtime[day]
         _center_attendance_numbers(ws, block)
         _write_output1_summary_block(ws, block, factory=factory)
 

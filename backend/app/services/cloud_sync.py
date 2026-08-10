@@ -1,10 +1,14 @@
 import json
+import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+
+from app.services.excel_compat import convert_xls_to_xlsx
 
 from app.services.drive_backup import (
     create_analysis_excel_copy,
@@ -27,6 +31,16 @@ CONFIG_PATH = STORAGE_DIR / "cloud_config.json"
 REQUEST_TIMEOUT_SECONDS = 20
 SUBMISSION_BUCKET = "attendance-submissions"
 LOCAL_EXPORT_DIR = STORAGE_DIR / "local_exports"
+LOCAL_EXPORT_FOLDERS = {
+    "output1": "Output 1",
+    "output2": "Output 2",
+    "bank_payroll": "Bang Luong Ngan Hang",
+    "employee_cards": "Anh Bang Cong Nhan Vien",
+    "mapping": "Gan Bang",
+    "recalculate": "Tinh Lai Tong Cong",
+    "legacy": "Chuyen Bang Cu",
+    "final_copy": "Ban Sao Cuoi Cung",
+}
 
 
 def get_cloud_config(include_secret: bool = False) -> dict[str, Any]:
@@ -85,6 +99,53 @@ def save_cloud_config(data: dict[str, Any]) -> dict[str, Any]:
     }
     _write_config(next_config)
     return get_cloud_config()
+
+
+def setup_local_export_folder(root_path: str = "") -> dict[str, Any]:
+    """Create the predictable local export tree on the selected drive."""
+
+    raw_root = str(root_path or "").strip() or str(LOCAL_EXPORT_DIR)
+    root = Path(raw_root).expanduser()
+    if not root.is_absolute():
+        root = (STORAGE_DIR / root).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    folders = {}
+    for key, name in LOCAL_EXPORT_FOLDERS.items():
+        folder = root / name
+        folder.mkdir(parents=True, exist_ok=True)
+        folders[key] = str(folder)
+
+    current = _read_config()
+    current["local_export_dir"] = str(root)
+    _write_config(current)
+    return {"status": "ok", "root": str(root), "folders": folders}
+
+
+def list_local_export_drives() -> list[str]:
+    if os.name == "nt":
+        return [f"{chr(code)}:\\" for code in range(ord("A"), ord("Z") + 1) if Path(f"{chr(code)}:\\").exists()]
+    return ["/"]
+
+
+def local_export_directory(kind: str) -> Path:
+    """Return (and create) one category folder under the configured root."""
+
+    config = get_cloud_config()
+    raw_root = str(config.get("local_export_dir") or LOCAL_EXPORT_DIR)
+    root = Path(raw_root).expanduser()
+    if not root.is_absolute():
+        root = (STORAGE_DIR / root).resolve()
+    folder = root / LOCAL_EXPORT_FOLDERS.get(kind, "Khac")
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def save_local_export_copy(source_path: Path, kind: str, filename: str | None = None) -> Path:
+    """Keep a local copy of a generated export in its setup category."""
+
+    target = local_export_directory(kind) / (filename or source_path.name)
+    shutil.copy2(source_path, target)
+    return target
 
 
 def test_cloud_connection() -> dict[str, Any]:
@@ -243,11 +304,16 @@ def download_submission_file(period_id: str, target_dir: Path) -> Path:
 
     filename = _filename_from_submission(submission)
     suffix = Path(filename).suffix.lower()
-    if suffix not in {".xlsx", ".xlsm"}:
+    if suffix not in {".xls", ".xlsx", ".xlsm"}:
         suffix = ".xlsx"
     output_path = target_dir / f"original{suffix}"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(_storage_request(config, "GET", f"/storage/v1/object/{SUBMISSION_BUCKET}/{_quote_storage_path(storage_path)}"))
+    if suffix == ".xls":
+        converted_path = target_dir / "original.xlsx"
+        convert_xls_to_xlsx(output_path, converted_path)
+        output_path.unlink(missing_ok=True)
+        return converted_path
     return output_path
 
 

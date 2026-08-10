@@ -3,6 +3,7 @@ import shutil
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from typing import Literal
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -22,6 +23,8 @@ from app.services.bank_payroll import (
     scan_official_workbook,
 )
 from app.services.bank_account_store import list_account_overview
+from app.services.excel_compat import is_supported_excel_suffix, prepare_excel_for_openpyxl
+from app.services.cloud_sync import save_local_export_copy
 
 
 router = APIRouter(prefix="/bank", tags=["bank"])
@@ -44,6 +47,7 @@ class AccountSaveRequest(BaseModel):
 class ExportRequest(BaseModel):
     scan_id: str
     accounts: list[AccountRow] = Field(default_factory=list)
+    missing_bank_policy: Literal["error", "only_with_account", "include_blank"] = "error"
 
 
 @router.get("/accounts")
@@ -71,20 +75,23 @@ def scan(
     user: dict = Depends(require_owner),
 ):
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".xlsx", ".xlsm"}:
-        raise HTTPException(status_code=400, detail="Chỉ nhận file Excel .xlsx hoặc .xlsm.")
+    if not is_supported_excel_suffix(suffix):
+        raise HTTPException(status_code=400, detail="Chỉ nhận file Excel .xls, .xlsx hoặc .xlsm.")
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     target = UPLOAD_DIR / f"{uuid.uuid4().hex}{suffix}"
     with target.open("wb") as output:
         shutil.copyfileobj(file.file, output)
+    readable_target = prepare_excel_for_openpyxl(target, UPLOAD_DIR)
     try:
-        return scan_official_workbook(target, factory)
+        return scan_official_workbook(readable_target, factory)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Không đọc được bảng lương: {exc}") from exc
     finally:
         target.unlink(missing_ok=True)
+        if readable_target != target:
+            readable_target.unlink(missing_ok=True)
 
 
 @router.post("/import-word")
@@ -142,23 +149,26 @@ def import_excel_salary(
     user: dict = Depends(require_owner),
 ):
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".xlsx", ".xlsm"}:
-        raise HTTPException(status_code=400, detail="Chỉ nhận file Excel lương .xlsx hoặc .xlsm.")
+    if not is_supported_excel_suffix(suffix):
+        raise HTTPException(status_code=400, detail="Chỉ nhận file Excel lương .xls, .xlsx hoặc .xlsm.")
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     target = UPLOAD_DIR / f"{uuid.uuid4().hex}{suffix}"
     with target.open("wb") as output:
         shutil.copyfileobj(file.file, output)
+    readable_target = prepare_excel_for_openpyxl(target, UPLOAD_DIR)
     try:
         # The old salary file is a supplementary account source.  It never
         # performs a blanket replacement; conflicts are returned for an
         # explicit user choice in the UI.
-        return import_accounts_from_excel_salary(target, factory, month, year, "fill_missing")
+        return import_accounts_from_excel_salary(readable_target, factory, month, year, "fill_missing")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Không nhập được file Excel lương: {exc}") from exc
     finally:
         target.unlink(missing_ok=True)
+        if readable_target != target:
+            readable_target.unlink(missing_ok=True)
 
 
 @router.post("/inspect-excel-salary")
@@ -167,19 +177,22 @@ def inspect_excel_salary(
     user: dict = Depends(require_owner),
 ):
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".xlsx", ".xlsm"}:
-        raise HTTPException(status_code=400, detail="Chỉ nhận file Excel lương .xlsx hoặc .xlsm.")
+    if not is_supported_excel_suffix(suffix):
+        raise HTTPException(status_code=400, detail="Chỉ nhận file Excel lương .xls, .xlsx hoặc .xlsm.")
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     target = UPLOAD_DIR / f"{uuid.uuid4().hex}{suffix}"
     with target.open("wb") as output:
         shutil.copyfileobj(file.file, output)
+    readable_target = prepare_excel_for_openpyxl(target, UPLOAD_DIR)
     try:
-        month, year = detect_excel_salary_period(target)
+        month, year = detect_excel_salary_period(readable_target)
         return {"month": month, "year": year}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Không đọc được tháng/năm trong Excel lương: {exc}") from exc
     finally:
         target.unlink(missing_ok=True)
+        if readable_target != target:
+            readable_target.unlink(missing_ok=True)
 
 
 @router.post("/export")
@@ -188,9 +201,11 @@ def export(request: ExportRequest, user: dict = Depends(require_owner)):
         path, filename = export_bank_excel(
             request.scan_id,
             [row.model_dump() for row in request.accounts],
+            request.missing_bank_policy,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    save_local_export_copy(path, "bank_payroll", filename)
     return FileResponse(
         path,
         filename=filename,
@@ -204,6 +219,7 @@ def export_local(request: ExportRequest, user: dict = Depends(require_owner)):
         path, filename = export_bank_excel_local(
             request.scan_id,
             [row.model_dump() for row in request.accounts],
+            request.missing_bank_policy,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

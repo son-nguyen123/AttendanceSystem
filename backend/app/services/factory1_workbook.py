@@ -78,6 +78,7 @@ def export_factory1_legacy_output2(source_path: Path, output_path: Path) -> Path
             values_workbook=values_workbook,
         )
         overtime = _legacy_overtime_by_code(source_sheet, values_sheet, records)
+        overtime_row_overrides = _legacy_overtime_row_overrides(source_sheet, values_sheet)
         historical_work_overrides = _legacy_work_overrides(source_sheet, values_sheet)
         workbook.close()
         values_workbook.close()
@@ -93,11 +94,20 @@ def export_factory1_legacy_output2(source_path: Path, output_path: Path) -> Path
                 "note": record.note or "",
                 "monthly_salary": _number(record.salary),
                 "bonus": _number(record.bonus) if record.bonus is not None else _number(old_values.get("bonus")),
-                "overtime_hours": _number(old_values.get("overtime_hours")) if old_values.get("overtime_hours") is not None else overtime.get(code, 0),
                 # An explicit empty value prevents the normal payroll writer
                 # from filling a bank number from the local bank registry.
                 "bank_account": "",
             }
+            # The legacy overtime input is the row directly below the daily
+            # work row. Preserve that row and let the new Output 2 formula
+            # sum it. A summary-column value is only used when no daily row
+            # exists for that employee.
+            if code not in overtime_row_overrides:
+                overtime_value = _number(old_values.get("overtime_hours"))
+                if overtime_value is None:
+                    overtime_value = overtime.get(code)
+                if overtime_value is not None:
+                    item["overtime_hours"] = overtime_value
             for key in ("penalty_rate", "nq_penalty", "advance_or_penalty"):
                 value = _number(old_values.get(key))
                 if value is not None:
@@ -113,6 +123,7 @@ def export_factory1_legacy_output2(source_path: Path, output_path: Path) -> Path
             processed_path,
             review_overrides=historical_work_overrides,
             factory="factory1",
+            overtime_overrides=overtime_row_overrides,
         )
         return export_payroll_workbook(
             processed_path,
@@ -150,6 +161,36 @@ def _legacy_work_overrides(source_sheet, values_sheet) -> list[dict]:
                 }
             )
     return overrides
+
+
+def _legacy_overtime_row_overrides(source_sheet, values_sheet) -> dict[str, dict[int, int | float]]:
+    """Read overtime entered in the row below each employee's work row.
+
+    In the old horizontal frame the empty-looking cell after the last day is
+    not a calendar day when that month has fewer than 31 days. The row below
+    the daily work row is the employee's overtime input row; keeping it by
+    day lets the new ``Giờ làm thêm`` formula calculate the same total.
+    """
+
+    result: dict[str, dict[int, int | float]] = {}
+    for block in detect_employee_blocks(source_sheet):
+        by_day: dict[int, int | float] = {}
+        for column in range(1, 32):
+            day = source_sheet.cell(block.day_row, column).value
+            if isinstance(day, bool):
+                continue
+            if isinstance(day, float) and day.is_integer():
+                day = int(day)
+            if not isinstance(day, int) or not 1 <= day <= 31:
+                continue
+            value = _number(values_sheet.cell(block.result_row + 1, column).value)
+            if value is None:
+                value = _number(source_sheet.cell(block.result_row + 1, column).value)
+            if value is not None:
+                by_day[day] = value
+        if by_day:
+            result[block.employee_code] = by_day
+    return result
 
 
 def _select_sheet(workbook):

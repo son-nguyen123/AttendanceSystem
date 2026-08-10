@@ -629,6 +629,7 @@ function App() {
   const [cloudLoading, setCloudLoading] = useState(false)
   const [submitLoading, setSubmitLoading] = useState(false)
   const [cloudConfig, setCloudConfig] = useState<CloudConfig | null>(null)
+  const [localExportDrives, setLocalExportDrives] = useState<string[]>([])
   const [cloudSubmissions, setCloudSubmissions] = useState<CloudSubmission[]>([])
   const [cloudForm, setCloudForm] = useState<CloudConfigForm>({
     enabled: false,
@@ -715,6 +716,13 @@ function App() {
       setAuthLoading(false)
     }
   }, [])
+
+  useEffect(() => {
+    if (!smartSettingsOpen) return
+    axios.get<{ drives: string[] }>(`${API_BASE}/cloud/export-folder/drives`)
+      .then((response) => setLocalExportDrives(response.data.drives || []))
+      .catch(() => setLocalExportDrives([]))
+  }, [smartSettingsOpen])
 
   useEffect(() => {
     if (ROLE_LOGIN_ENABLED && !auth) return
@@ -1126,9 +1134,8 @@ function App() {
   }
 
   async function inspectSelectedFile(selectedFile: File, role: WorkbookRole): Promise<FileInspection | null> {
-    const lowerName = selectedFile.name.toLowerCase()
-    if (!lowerName.endsWith('.xlsx') && !lowerName.endsWith('.xlsm')) {
-      setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xlsx hoặc .xlsm.`)
+    if (!isExcelFile(selectedFile)) {
+      setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xls, .xlsx hoặc .xlsm.`)
       setMessage(null)
       return null
     }
@@ -1174,7 +1181,7 @@ function App() {
     clearTemporaryAnalysis()
     if (!smartScanEnabled) {
       if (!isExcelFile(selectedFile)) {
-        setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xlsx hoặc .xlsm.`)
+        setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xls, .xlsx hoặc .xlsm.`)
         return
       }
       setFile(selectedFile)
@@ -1193,7 +1200,7 @@ function App() {
     if (!selectedFile) return
     if (!smartScanEnabled) {
       if (!isExcelFile(selectedFile)) {
-        setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xlsx hoặc .xlsm.`)
+        setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xls, .xlsx hoặc .xlsm.`)
         return
       }
       if (role === 'mapping_current') setMappingCurrentFile(selectedFile)
@@ -1213,7 +1220,7 @@ function App() {
     if (!selectedFile) return
     if (!smartScanEnabled) {
       if (!isExcelFile(selectedFile)) {
-        setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xlsx hoặc .xlsm.`)
+        setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xls, .xlsx hoặc .xlsm.`)
         return
       }
       setRecalculateFile(selectedFile)
@@ -2156,6 +2163,25 @@ function App() {
     }
   }
 
+  async function setupLocalExportFolder() {
+    setCloudLoading(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const response = await axios.post<{ root: string; folders: Record<string, string>; config: CloudConfig }>(
+        `${API_BASE}/cloud/export-folder/setup`,
+        { root_path: cloudForm.local_export_dir },
+      )
+      setCloudConfig(response.data.config)
+      setCloudForm((current) => ({ ...current, local_export_dir: response.data.root }))
+      setMessage(`Đã tạo bộ thư mục xuất tại ${response.data.root}`)
+    } catch (err) {
+      setError(readAxiosError(err, 'Không tạo được bộ thư mục xuất'))
+    } finally {
+      setCloudLoading(false)
+    }
+  }
+
   async function testCloudConfig() {
     setCloudLoading(true)
     setError(null)
@@ -2310,9 +2336,8 @@ function App() {
     setError(null)
     setMessage(null)
     if (!selectedFile) return false
-    const lowerName = selectedFile.name.toLowerCase()
-    if (!lowerName.endsWith('.xlsx') && !lowerName.endsWith('.xlsm')) {
-      setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xlsx hoặc .xlsm.`)
+    if (!isExcelFile(selectedFile)) {
+      setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xls, .xlsx hoặc .xlsm.`)
       return false
     }
 
@@ -2918,7 +2943,7 @@ function App() {
     setMessage(null)
     if (selectedFile && !isExcelFile(selectedFile)) {
       setFactory2LegacyFile(null)
-      setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xlsx hoặc .xlsm.`)
+      setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xls, .xlsx hoặc .xlsm.`)
       return
     }
     setFactory2LegacyFile(selectedFile)
@@ -2934,7 +2959,7 @@ function App() {
       uploadForm.append('file', factory2LegacyFile)
       uploadForm.append('output_kind', factory2LegacyOutputKind)
       const response = await axios.post(`${API_BASE}/attendance/factory2/convert-legacy`, uploadForm, { responseType: 'blob' })
-      const sourceStem = factory2LegacyFile.name.replace(/\.(xlsx|xlsm)$/i, '')
+      const sourceStem = factory2LegacyFile.name.replace(/\.(xls|xlsx|xlsm)$/i, '')
       const outputLabel = factory2LegacyOutputKind === 'output2' ? 'Output2_KhungMoi' : 'Output1'
       const filename = `Xuong2_${outputLabel}_${sourceStem}.xlsx`
       const convertedFile = new File([response.data], filename, {
@@ -3449,6 +3474,20 @@ function App() {
               <div className="smart-setting-local-copy">
                 <strong>Thư mục lưu cục bộ bảng lương</strong>
                 <span>Chọn thư mục trên máy để lựa chọn “Lưu cục bộ” ghi file Excel vào đó. Nếu để trống, app dùng thư mục local_exports.</span>
+                {localExportDrives.length > 0 && (
+                  <select
+                    className="smart-setting-path-input"
+                    value={localExportDrives.find((drive) => cloudForm.local_export_dir.toLowerCase().startsWith(drive.toLowerCase())) || ''}
+                    onChange={(event) => {
+                      const drive = event.target.value
+                      if (drive) setCloudForm((current) => ({ ...current, local_export_dir: `${drive}AttendanceSystem_Exports` }))
+                    }}
+                    aria-label="Ổ lưu bộ thư mục xuất"
+                  >
+                    <option value="">Chọn ổ lưu</option>
+                    {localExportDrives.map((drive) => <option key={drive} value={drive}>{drive}</option>)}
+                  </select>
+                )}
                 <input
                   className="smart-setting-path-input"
                   value={cloudForm.local_export_dir}
@@ -3457,6 +3496,9 @@ function App() {
                 />
                 <button type="button" className="secondary-button smart-setting-save-button" disabled={cloudLoading} onClick={() => void saveCloudConfig()}>
                   {cloudLoading ? 'Đang lưu...' : 'Lưu thư mục cục bộ'}
+                </button>
+                <button type="button" className="secondary-button smart-setting-save-button" disabled={cloudLoading} onClick={() => void setupLocalExportFolder()}>
+                  {cloudLoading ? 'Đang tạo...' : 'Tạo bộ thư mục xuất'}
                 </button>
               </div>
             </div>
@@ -3817,7 +3859,6 @@ function App() {
                 placeholder="Bảng cũ Xưởng 1"
                 busy={factory1LegacyLoading ? 'Đang tạo khung mới...' : null}
                 disabled={factory1LegacyLoading}
-                allowLegacyXls
                 onFile={selectFactory1LegacyFile}
               />
             </div>
@@ -4717,6 +4758,8 @@ type BankScan = {
   employees: BankEmployee[]
 }
 
+type BankMissingPolicy = 'only_with_account' | 'include_blank'
+
 function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfirm: (options: ConfirmationOptions) => Promise<boolean> }) {
   const [bankTab, setBankTab] = useState<'transfer' | 'accounts'>('transfer')
   const [file, setFile] = useState<File | null>(null)
@@ -4727,6 +4770,7 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [exportChoiceOpen, setExportChoiceOpen] = useState(false)
+  const [bankMissingPolicy, setBankMissingPolicy] = useState<BankMissingPolicy | null>(null)
   const [salaryFile, setSalaryFile] = useState<File | null>(null)
   const [salaryMonth, setSalaryMonth] = useState(String(new Date().getMonth() + 1))
   const [salaryYear, setSalaryYear] = useState(String(new Date().getFullYear()))
@@ -4844,8 +4888,8 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
   async function selectSalaryFile(selected: File | null) {
     setSalaryFile(selected)
     if (!selected) return
-    if (!/\.(xlsx|xlsm)$/i.test(selected.name)) {
-      setError('Chỉ nhận file Excel .xlsx hoặc .xlsm.')
+    if (!/\.(xls|xlsx|xlsm)$/i.test(selected.name)) {
+      setError('Chỉ nhận file Excel .xls, .xlsx hoặc .xlsm.')
       setSalaryFile(null)
       return
     }
@@ -4980,7 +5024,7 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
     }
   }
 
-  async function exportExcel(destination: 'drive' | 'local') {
+  async function exportExcel(destination: 'drive' | 'local', missingPolicy: BankMissingPolicy | 'error' = 'error') {
     if (!scan) return
     setExportChoiceOpen(false)
     setBusy('export')
@@ -4994,14 +5038,14 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
       if (destination === 'local') {
         const saved = await axios.post<{ path: string; filename: string }>(
           `${API_BASE}/bank/export-local`,
-          { scan_id: scan.scan_id, accounts: rows },
+          { scan_id: scan.scan_id, accounts: rows, missing_bank_policy: missingPolicy },
         )
         setNotice(`Đã lưu file bảng lương cục bộ: ${saved.data.path}`)
         return
       }
       const response = await axios.post(
         `${API_BASE}/bank/export`,
-        { scan_id: scan.scan_id, accounts: rows },
+        { scan_id: scan.scan_id, accounts: rows, missing_bank_policy: missingPolicy },
         { responseType: 'blob' },
       )
       const month = String(scan.month || 0).padStart(2, '0')
@@ -5026,21 +5070,41 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
             onMouseDown={(event) => event.stopPropagation()}
           >
             <p className="export-choice-kicker">Xuất Excel ngân hàng</p>
-            <h2 id="bank-export-choice-title">Bạn có muốn lưu danh sách này không?</h2>
-            <p>
-              Nếu lưu, số tài khoản sẽ được ghi nhớ trên máy và sao lưu vào Drive để dùng lại ở tháng sau.
-              Nếu không lưu, app chỉ tạo file Excel ngân hàng lần này.
-            </p>
-            <div className="export-choice-options">
-              <button type="button" className="export-choice-card bank-save-choice" onClick={() => void exportExcel('drive')}>
-                <strong>Lưu Drive</strong>
-                <span>Ghi nhớ số tài khoản, sao lưu lên Drive rồi xuất file Excel ngân hàng.</span>
-              </button>
-              <button type="button" className="export-choice-card formula-only" onClick={() => void exportExcel('local')}>
-                <strong>Lưu cục bộ</strong>
-                <span>Ghi nhớ số tài khoản và lưu file vào thư mục cục bộ đã cài đặt trên máy.</span>
-              </button>
-            </div>
+            {missing > 0 && !bankMissingPolicy ? (
+              <>
+                <h2 id="bank-export-choice-title">Có {missing} mã chưa có số tài khoản</h2>
+                <p>Các mã này chưa thể chuyển tiền. Hãy chọn cách xuất file:</p>
+                <div className="export-choice-options">
+                  <button type="button" className="export-choice-card bank-save-choice" onClick={() => setBankMissingPolicy('only_with_account')}>
+                    <strong>Chỉ xuất mã đã có</strong>
+                    <span>Bỏ các mã đang thiếu số tài khoản khỏi file.</span>
+                  </button>
+                  <button type="button" className="export-choice-card formula-only" onClick={() => setBankMissingPolicy('include_blank')}>
+                    <strong>Xuất tất cả, để trống</strong>
+                    <span>Giữ đủ mã nhân viên và để trống ô số tài khoản còn thiếu.</span>
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h2 id="bank-export-choice-title">Bạn có muốn lưu danh sách này không?</h2>
+                <p>
+                  Nếu lưu, số tài khoản sẽ được ghi nhớ trên máy và sao lưu vào Drive để dùng lại ở tháng sau.
+                  Nếu không lưu, app chỉ tạo file Excel ngân hàng lần này.
+                </p>
+                <div className="export-choice-options">
+                  <button type="button" className="export-choice-card bank-save-choice" onClick={() => void exportExcel('drive', bankMissingPolicy || 'error')}>
+                    <strong>Lưu Drive</strong>
+                    <span>Ghi nhớ số tài khoản, sao lưu lên Drive rồi xuất file Excel ngân hàng.</span>
+                  </button>
+                  <button type="button" className="export-choice-card formula-only" onClick={() => void exportExcel('local', bankMissingPolicy || 'error')}>
+                    <strong>Lưu cục bộ</strong>
+                    <span>Ghi nhớ số tài khoản và lưu file vào thư mục cục bộ đã cài đặt trên máy.</span>
+                  </button>
+                </div>
+                {missing > 0 && <button type="button" className="secondary-button export-choice-cancel" onClick={() => setBankMissingPolicy(null)}>Đổi cách xuất</button>}
+              </>
+            )}
             <button type="button" className="secondary-button export-choice-cancel" onClick={() => setExportChoiceOpen(false)}>Hủy</button>
           </section>
         </div>
@@ -5130,8 +5194,8 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
             setFile(event.dataTransfer.files?.[0] || null)
           }}
         >
-          <input type="file" accept=".xlsx,.xlsm" onChange={(event) => setFile(event.target.files?.[0] || null)} />
-          <span className="bank-file-mark">XLSX</span>
+          <input type="file" accept=".xls,.xlsx,.xlsm" onChange={(event) => setFile(event.target.files?.[0] || null)} />
+          <span className="bank-file-mark">XLS</span>
           <span><strong>{file?.name || 'Chọn bảng chính thức Output 2'}</strong><small>File có họ tên, mã nhân viên và tiền lương cuối</small></span>
         </label>
         <button type="button" disabled={!file || Boolean(busy)} onClick={scanFile}>{busy === 'scan' ? 'Đang quét...' : 'Quét bảng lương'}</button>
@@ -5156,8 +5220,8 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
             void selectSalaryFile(event.dataTransfer.files?.[0] || null)
           }}
         >
-          <input type="file" accept=".xlsx,.xlsm" onChange={(event) => void selectSalaryFile(event.target.files?.[0] || null)} />
-          <span>XLSX</span>
+          <input type="file" accept=".xls,.xlsx,.xlsm" onChange={(event) => void selectSalaryFile(event.target.files?.[0] || null)} />
+          <span>XLS</span>
           <strong>{salaryFile?.name || 'Chọn hoặc kéo thả file Excel lương cũ'}</strong>
         </label>
         <label className="bank-period-field"><span>Tháng</span><input className="bank-period-input" type="number" min="1" max="12" value={salaryMonth} onChange={(event) => setSalaryMonth(event.target.value)} aria-label="Tháng Excel lương cũ" /></label>
@@ -5263,7 +5327,7 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
           <span>{conflictCount ? `Có ${conflictCount} mã bị trùng hoặc có nhiều số tài khoản; hãy kiểm tra lại trước khi xuất.` : missing ? `Còn ${missing} nhân viên cần nhập số tài khoản trước khi xuất.` : rows.length ? 'Danh sách đã đủ thông tin để xuất.' : 'Dữ liệu được lưu trên máy; Drive dùng để sao lưu và khôi phục.'}</span>
           <div>
             <button type="button" className="secondary-button" disabled={!rows.length || Boolean(busy) || conflictCount > 0} onClick={save}>{busy === 'save' ? 'Đang lưu...' : 'Lưu số tài khoản'}</button>
-            <button type="button" disabled={!scan || Boolean(busy) || missing > 0 || conflictCount > 0} onClick={() => setExportChoiceOpen(true)}>{busy === 'export' ? 'Đang tạo Excel...' : 'Xuất Excel ngân hàng'}</button>
+            <button type="button" disabled={!scan || Boolean(busy) || conflictCount > 0} onClick={() => { setBankMissingPolicy(null); setExportChoiceOpen(true) }}>{busy === 'export' ? 'Đang tạo Excel...' : 'Xuất Excel ngân hàng'}</button>
           </div>
         </div>
       </div>
@@ -8278,7 +8342,6 @@ function ExcelDropZone({
   placeholder,
   busy,
   disabled = false,
-  allowLegacyXls = false,
   onFile,
 }: {
   id: string
@@ -8287,7 +8350,6 @@ function ExcelDropZone({
   placeholder: string
   busy?: string | null
   disabled?: boolean
-  allowLegacyXls?: boolean
   onFile: (file: File | null) => void | Promise<void>
 }) {
   const [dragging, setDragging] = useState(false)
@@ -8321,7 +8383,7 @@ function ExcelDropZone({
       <input
         id={id}
         type="file"
-        accept={allowLegacyXls ? '.xls,.xlsx,.xlsm' : '.xlsx,.xlsm'}
+        accept=".xls,.xlsx,.xlsm"
         disabled={disabled}
         onChange={(event) => {
           const selectedFile = event.currentTarget.files?.[0] ?? null
@@ -9269,7 +9331,7 @@ function readSmartSettings() {
 
 function isExcelFile(file: File) {
   const lowerName = file.name.toLowerCase()
-  return lowerName.endsWith('.xlsx') || lowerName.endsWith('.xlsm')
+  return lowerName.endsWith('.xls') || lowerName.endsWith('.xlsx') || lowerName.endsWith('.xlsm')
 }
 
 function isLegacyExcelFile(file: File) {

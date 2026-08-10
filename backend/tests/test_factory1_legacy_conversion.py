@@ -112,6 +112,67 @@ class Factory1LegacyConversionTests(unittest.TestCase):
 
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_carries_overtime_input_row_into_new_overtime_formula(self):
+        import tempfile
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="factory1-overtime-row-test-"))
+        try:
+            source = temp_dir / "legacy.xlsx"
+            output = temp_dir / "converted.xlsx"
+            _legacy_workbook(source)
+
+            workbook = load_workbook(source)
+            sheet = workbook.active
+            # Day 1 has no day-31 column in this sample. The value below the
+            # daily work row is the historical overtime input for day 1.
+            sheet["D8"] = 8
+            workbook.save(source)
+            workbook.close()
+
+            export_factory1_legacy_output2(source, output)
+            converted = load_workbook(output, data_only=False)
+            sheet = converted.active
+            self.assertEqual(sheet["D8"].value, 8)
+            self.assertTrue(str(sheet["AN7"].value).startswith("=SUM("))
+            converted.close()
+        finally:
+            import shutil
+
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_maps_work_and_overtime_by_the_same_calendar_day(self):
+        import tempfile
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="factory1-overtime-by-day-test-"))
+        try:
+            source = temp_dir / "legacy.xlsx"
+            output = temp_dir / "converted.xlsx"
+            _legacy_workbook(source)
+
+            workbook = load_workbook(source)
+            sheet = workbook.active
+            # W is the 20th calendar-day column in this frame.  The old
+            # workbook deliberately records 5 hours of work and 8 overtime
+            # hours for the same day.
+            sheet["W2"] = 20
+            sheet["W7"] = 5
+            sheet["W8"] = 8
+            workbook.save(source)
+            workbook.close()
+
+            export_factory1_legacy_output2(source, output)
+            converted = load_workbook(output, data_only=False)
+            sheet = converted.active
+            self.assertEqual(sheet["W7"].value, 5)
+            self.assertEqual(sheet["W8"].value, 8)
+            self.assertTrue(str(sheet["AN7"].value).startswith("=SUM("))
+            self.assertIn("A8:AE8", sheet["AN7"].value)
+            converted.close()
+        finally:
+            import shutil
+
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_keeps_separate_penalty_and_advance_inputs_when_old_file_has_both(self):
         import tempfile
 

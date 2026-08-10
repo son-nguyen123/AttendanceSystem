@@ -18,7 +18,7 @@ from docx.shared import Cm, Pt
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
-from app.services.cloud_sync import get_cloud_config
+from app.services.cloud_sync import get_cloud_config, local_export_directory
 from app.services.bank_account_store import find_duplicate_account_groups, normalize_account_number
 from app.services.payroll_store import normalize_employee_name
 
@@ -616,8 +616,9 @@ def export_bank_docx(scan_id: str, account_overrides: list[dict[str, Any]] | Non
             duplicates.append(f"{seen_accounts[account]} và {item['employee_code']}")
         else:
             seen_accounts[account] = item["employee_code"]
-        employees.append({**item, "account_number": account})
-    if missing:
+        if missing_bank_policy != "only_with_account" or account:
+            employees.append({**item, "account_number": account})
+    if missing and missing_bank_policy == "error":
         raise ValueError("Chưa có số tài khoản cho mã: " + ", ".join(missing[:12]))
     if duplicates:
         raise ValueError("Phát hiện số tài khoản trùng ở mã: " + ", ".join(duplicates[:8]))
@@ -632,7 +633,11 @@ def export_bank_docx(scan_id: str, account_overrides: list[dict[str, Any]] | Non
     return output, filename
 
 
-def export_bank_excel(scan_id: str, account_overrides: list[dict[str, Any]] | None = None) -> tuple[Path, str]:
+def export_bank_excel(
+    scan_id: str,
+    account_overrides: list[dict[str, Any]] | None = None,
+    missing_bank_policy: str = "error",
+) -> tuple[Path, str]:
     """Export the scanned payroll rows as the bank's Excel payment layout.
 
     The account validation is intentionally the same as the legacy Word
@@ -650,6 +655,8 @@ def export_bank_excel(scan_id: str, account_overrides: list[dict[str, Any]] | No
         for row in (account_overrides or [])
         if _employee_code(row.get("employee_code"))
     }
+    if missing_bank_policy not in {"error", "only_with_account", "include_blank"}:
+        raise ValueError("Cách xuất khi thiếu số tài khoản không hợp lệ.")
     employees = []
     missing = []
     seen_accounts: dict[str, str] = {}
@@ -663,8 +670,9 @@ def export_bank_excel(scan_id: str, account_overrides: list[dict[str, Any]] | No
             duplicates.append(f"{seen_accounts[account]} vÃ  {item['employee_code']}")
         else:
             seen_accounts[account] = item["employee_code"]
-        employees.append({**item, "account_number": account})
-    if missing:
+        if missing_bank_policy != "only_with_account" or account:
+            employees.append({**item, "account_number": account})
+    if missing and missing_bank_policy == "error":
         raise ValueError("ChÆ°a cÃ³ sá»‘ tÃ i khoáº£n cho mÃ£: " + ", ".join(missing[:12]))
     if duplicates:
         raise ValueError("PhÃ¡t hiá»‡n sá»‘ tÃ i khoáº£n trÃ¹ng á»Ÿ mÃ£: " + ", ".join(duplicates[:8]))
@@ -681,16 +689,12 @@ def export_bank_excel(scan_id: str, account_overrides: list[dict[str, Any]] | No
 def export_bank_excel_local(
     scan_id: str,
     account_overrides: list[dict[str, Any]] | None = None,
+    missing_bank_policy: str = "error",
 ) -> tuple[Path, str]:
     """Create the bank workbook and copy it to the configured local folder."""
 
-    source_path, filename = export_bank_excel(scan_id, account_overrides)
-    config = get_cloud_config()
-    raw_directory = str(config.get("local_export_dir") or (STORAGE_DIR / "local_exports"))
-    target_directory = Path(raw_directory).expanduser()
-    if not target_directory.is_absolute():
-        target_directory = (STORAGE_DIR / target_directory).resolve()
-    target_directory.mkdir(parents=True, exist_ok=True)
+    source_path, filename = export_bank_excel(scan_id, account_overrides, missing_bank_policy)
+    target_directory = local_export_directory("bank_payroll")
     target_path = target_directory / filename
     shutil.copy2(source_path, target_path)
     return target_path, filename

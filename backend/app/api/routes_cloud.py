@@ -23,6 +23,9 @@ from app.services.cloud_sync import (
     run_final_excel_copy,
     run_period_excel_backup,
     save_cloud_config,
+    save_local_export_copy,
+    setup_local_export_folder,
+    list_local_export_drives,
     sync_period_detail,
     test_cloud_connection,
 )
@@ -34,6 +37,7 @@ from app.services.workbook_guard import (
     inspect_workbook_for_role,
     profile_workbook,
 )
+from app.services.excel_compat import is_supported_excel_suffix, prepare_excel_for_openpyxl
 
 
 router = APIRouter(prefix="/cloud", tags=["cloud"])
@@ -62,6 +66,10 @@ class OpenDriveFolderRequest(BaseModel):
     kind: Literal["root", "excel", "zip", "last"] = "excel"
 
 
+class LocalExportFolderSetupRequest(BaseModel):
+    root_path: str = ""
+
+
 @router.get("/config")
 def get_config(user: dict = Depends(require_owner)) -> dict[str, Any]:
     return get_cloud_config()
@@ -70,6 +78,24 @@ def get_config(user: dict = Depends(require_owner)) -> dict[str, Any]:
 @router.post("/config")
 def save_config(request: CloudConfigRequest, user: dict = Depends(require_owner)) -> dict[str, Any]:
     return save_cloud_config(request.model_dump())
+
+
+@router.post("/export-folder/setup")
+def setup_export_folder(
+    request: LocalExportFolderSetupRequest,
+    user: dict = Depends(require_owner),
+) -> dict[str, Any]:
+    try:
+        result = setup_local_export_folder(request.root_path)
+        result["config"] = get_cloud_config()
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Không tạo được bộ thư mục xuất: {exc}") from exc
+
+
+@router.get("/export-folder/drives")
+def get_export_folder_drives(user: dict = Depends(require_owner)) -> dict[str, list[str]]:
+    return {"drives": list_local_export_drives()}
 
 
 @router.post("/test")
@@ -180,8 +206,8 @@ async def save_final_excel_copy(
     user: dict = Depends(require_owner),
 ) -> dict[str, Any]:
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".xlsx", ".xlsm"}:
-        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xlsx hoặc .xlsm")
+    if not is_supported_excel_suffix(suffix):
+        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xls, .xlsx hoặc .xlsm")
     if month < 1 or month > 12 or year < 2000:
         raise HTTPException(status_code=400, detail="Tháng/năm lưu không hợp lệ")
 
@@ -189,12 +215,13 @@ async def save_final_excel_copy(
     session_dir.mkdir(parents=True, exist_ok=True)
     uploaded_path = session_dir / f"final_copy{suffix}"
     uploaded_path.write_bytes(await file.read())
+    readable_path = prepare_excel_for_openpyxl(uploaded_path, session_dir)
 
     try:
         # Final copies are the long-lived payroll source.  They must always
         # pass the strict new-Output-2 guard; the general smart-scan toggle
         # must not provide a way to store a legacy/wrong frame.
-        profile = inspect_workbook_for_role(uploaded_path, "final_copy", factory=factory)
+        profile = inspect_workbook_for_role(readable_path, "final_copy", factory=factory)
         ensure_period_matches(profile, month, year, "Bản sao cuối cùng")
         existing_copies = list_drive_final_copies(month=month, year=year, factory=factory)
         if existing_copies and not replace_existing:
@@ -202,15 +229,20 @@ async def save_final_excel_copy(
                 status_code=409,
                 detail=f"Đã có bản chốt cuối cùng cho tháng {month:02d}/{year}. Hãy xác nhận thay thế bằng file mới.",
             )
-        return run_final_excel_copy(
-            uploaded_path,
-            file.filename or f"ban_sao_cuoi_cung{suffix}",
+        stored_filename = file.filename or f"ban_sao_cuoi_cung{suffix}"
+        if suffix == ".xls":
+            stored_filename = f"{Path(stored_filename).stem}.xlsx"
+        result = run_final_excel_copy(
+            readable_path,
+            stored_filename,
             month,
             year,
             factory=factory,
             profile_sync_mode="replace_manual",
             replace_existing=replace_existing,
         )
+        save_local_export_copy(readable_path, "final_copy", stored_filename)
+        return result
     except HTTPException:
         shutil.rmtree(session_dir, ignore_errors=True)
         raise
@@ -227,17 +259,18 @@ async def detect_final_copy_period(
     user: dict = Depends(require_owner),
 ) -> dict[str, Any]:
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".xlsx", ".xlsm"}:
-        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xlsx hoặc .xlsm")
+    if not is_supported_excel_suffix(suffix):
+        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xls, .xlsx hoặc .xlsm")
 
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     try:
         with TemporaryDirectory(dir=STORAGE_DIR) as temp_dir:
             uploaded_path = Path(temp_dir) / f"final_copy{suffix}"
             uploaded_path.write_bytes(await file.read())
+            readable_path = prepare_excel_for_openpyxl(uploaded_path, Path(temp_dir))
             # Always inspect final copies with the strict new-frame guard so
             # the preview and the save endpoint enforce the same contract.
-            profile = inspect_workbook_for_role(uploaded_path, "final_copy", factory=factory)
+            profile = inspect_workbook_for_role(readable_path, "final_copy", factory=factory)
             return profile.to_dict()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Không đọc được tháng/năm từ file chốt: {exc}") from exc
