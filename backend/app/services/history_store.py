@@ -901,7 +901,6 @@ def _build_attendance_overview(year: int | None = None, factory: str | None = No
         employees.values(),
         key=lambda item: (
             0 if item["active"] else 1,
-            -float(item["total_work_days"]),
             _employee_sort_key(item["employee_code"]),
         ),
     )
