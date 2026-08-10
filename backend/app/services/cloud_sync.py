@@ -30,7 +30,8 @@ STORAGE_DIR = Path(__file__).resolve().parents[2] / "storage"
 CONFIG_PATH = STORAGE_DIR / "cloud_config.json"
 REQUEST_TIMEOUT_SECONDS = 20
 SUBMISSION_BUCKET = "attendance-submissions"
-LOCAL_EXPORT_DIR = STORAGE_DIR / "local_exports"
+LOCAL_EXPORT_DIR = Path(r"C:\folder chứa data xuất từ app chấm công")
+LEGACY_LOCAL_EXPORT_DIR = STORAGE_DIR / "local_exports"
 LOCAL_EXPORT_FOLDERS = {
     "output1": "Output 1",
     "output2": "Output 2",
@@ -46,6 +47,7 @@ LOCAL_EXPORT_FOLDERS = {
 def get_cloud_config(include_secret: bool = False) -> dict[str, Any]:
     config = _read_config()
     key = str(config.get("service_role_key") or "")
+    configured_local_export_dir = _local_export_root_from_config(config)
     result = {
         "enabled": bool(config.get("enabled")),
         "configured": bool(config.get("supabase_url") and key),
@@ -57,7 +59,7 @@ def get_cloud_config(include_secret: bool = False) -> dict[str, Any]:
         "key_hint": _key_hint(key),
         "drive_backup_enabled": bool(config.get("drive_backup_enabled")),
         "drive_backup_dir": str(config.get("drive_backup_dir") or default_backup_dir()),
-        "local_export_dir": str(config.get("local_export_dir") or LOCAL_EXPORT_DIR),
+        "local_export_dir": str(configured_local_export_dir),
         "backup_on_history_change": bool(config.get("backup_on_history_change", True)),
         "last_backup_at": config.get("last_backup_at"),
         "last_backup_path": config.get("last_backup_path"),
@@ -88,7 +90,11 @@ def save_cloud_config(data: dict[str, Any]) -> dict[str, Any]:
         "sync_on_save": bool(data.get("sync_on_save", False)),
         "drive_backup_enabled": bool(data.get("drive_backup_enabled")),
         "drive_backup_dir": str(data.get("drive_backup_dir") or current.get("drive_backup_dir") or default_backup_dir()).strip(),
-        "local_export_dir": str(data.get("local_export_dir") or current.get("local_export_dir") or LOCAL_EXPORT_DIR).strip(),
+        "local_export_dir": str(
+            data.get("local_export_dir")
+            or _local_export_root_from_config(current)
+            or LOCAL_EXPORT_DIR
+        ).strip(),
         "backup_on_history_change": bool(data.get("backup_on_history_change", True)),
         "last_test_at": current.get("last_test_at"),
         "last_sync_at": current.get("last_sync_at"),
@@ -138,6 +144,22 @@ def local_export_directory(kind: str) -> Path:
     folder = root / LOCAL_EXPORT_FOLDERS.get(kind, "Khac")
     folder.mkdir(parents=True, exist_ok=True)
     return folder
+
+
+def _local_export_root_from_config(config: dict[str, Any]) -> Path:
+    """Return the external export root and migrate the old in-repo default."""
+
+    raw_root = str(config.get("local_export_dir") or "").strip()
+    if not raw_root:
+        return LOCAL_EXPORT_DIR
+
+    root = Path(raw_root).expanduser()
+    try:
+        if root.resolve() == LEGACY_LOCAL_EXPORT_DIR.resolve():
+            return LOCAL_EXPORT_DIR
+    except OSError:
+        pass
+    return root
 
 
 def save_local_export_copy(source_path: Path, kind: str, filename: str | None = None) -> Path:
