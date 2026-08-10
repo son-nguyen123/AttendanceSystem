@@ -108,14 +108,20 @@ Các file xuất cục bộ được tách hoàn toàn theo xưởng tại thư 
 
 ```text
 data xuất lương/
-├── Xuong1/              01_Output1 ... 08_BanChot_LichSu
-└── Xuong2/              01_Output1 ... 08_BanChot_LichSu
+├── Xuong1/
+│   └── 01_Output1 ... 08_BanChot_LichSu/
+│       └── 2026/Thang_07/
+└── Xuong2/
+    └── 01_Output1 ... 08_BanChot_LichSu/
+        └── 2026/Thang_07/
 ```
 
 Khi lưu **Bản đang phân tích**, **Bản sao cuối cùng** hoặc sao lưu Excel theo
 kỳ, ứng dụng lưu cả bản Google Drive và bản cục bộ trong cây thư mục đúng xưởng.
-Nếu nâng cấp từ cấu trúc thư mục chung cũ, app tự chuyển file có thể xác định
-được xưởng và không ghi đè file đã tồn tại.
+Năm và tháng được tạo tự động từ kỳ đã phân tích, nội dung workbook hoặc tên
+file; file không xác định chắc chắn được kỳ sẽ vào `ChuaXacDinh` thay vì bị xếp
+nhầm theo ngày máy tính. Nếu nâng cấp từ cấu trúc cũ, app tự chuyển file có thể
+xác định được xưởng/kỳ và không ghi đè file đã tồn tại.
 
 ## Dữ liệu không được đưa lên GitHub
 

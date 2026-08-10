@@ -26,8 +26,8 @@ class EmployeeExcelScreenshotTests(unittest.TestCase):
 
             ensure_local_export_folders(root, factory="factory1")
 
-            self.assertTrue((root / "Xuong2" / "02_Output2_BangLuong" / "Output2.xlsx").exists())
-            self.assertTrue((root / "Xuong1" / "04_NganHang" / "Xuong1_2026-07_BangLuongNganHang.xlsx").exists())
+            self.assertTrue((root / "Xuong2" / "02_Output2_BangLuong" / "2026" / "Thang_07" / "Output2.xlsx").exists())
+            self.assertTrue((root / "Xuong1" / "04_NganHang" / "2026" / "Thang_07" / "Xuong1_2026-07_BangLuongNganHang.xlsx").exists())
             self.assertFalse(old_output2.exists())
             self.assertFalse(old_bank.exists())
 
@@ -38,15 +38,15 @@ class EmployeeExcelScreenshotTests(unittest.TestCase):
             source.write_bytes(b"zip-placeholder")
             export_root = root / "exports"
             with patch("app.services.cloud_sync.get_cloud_config", return_value={"local_export_dir": str(export_root)}):
-                factory1_target = save_local_export_copy(source, "employee_cards", "factory1.zip", factory="factory1")
-                factory2_target = save_local_export_copy(source, "employee_cards", "factory2.zip", factory="factory2")
-                factory1_output = save_local_export_copy(source, "output1", "output1.zip", factory="factory1")
-                factory2_output = save_local_export_copy(source, "output1", "output1.zip", factory="factory2")
+                factory1_target = save_local_export_copy(source, "employee_cards", "factory1.zip", factory="factory1", month=7, year=2026)
+                factory2_target = save_local_export_copy(source, "employee_cards", "factory2.zip", factory="factory2", month=7, year=2026)
+                factory1_output = save_local_export_copy(source, "output1", "output1.zip", factory="factory1", month=7, year=2026)
+                factory2_output = save_local_export_copy(source, "output1", "output1.zip", factory="factory2", month=7, year=2026)
 
-            self.assertEqual(factory1_target.parent, export_root / "Xuong1" / "03_AnhChamCong")
-            self.assertEqual(factory2_target.parent, export_root / "Xuong2" / "03_AnhChamCong")
-            self.assertEqual(factory1_output.parent, export_root / "Xuong1" / "01_Output1")
-            self.assertEqual(factory2_output.parent, export_root / "Xuong2" / "01_Output1")
+            self.assertEqual(factory1_target.parent, export_root / "Xuong1" / "03_AnhChamCong" / "2026" / "Thang_07")
+            self.assertEqual(factory2_target.parent, export_root / "Xuong2" / "03_AnhChamCong" / "2026" / "Thang_07")
+            self.assertEqual(factory1_output.parent, export_root / "Xuong1" / "01_Output1" / "2026" / "Thang_07")
+            self.assertEqual(factory2_output.parent, export_root / "Xuong2" / "01_Output1" / "2026" / "Thang_07")
 
     def test_exports_one_exact_excel_range_per_employee(self) -> None:
         with TemporaryDirectory() as temporary_dir:

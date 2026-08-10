@@ -22,6 +22,18 @@ class PeriodDetectorTests(unittest.TestCase):
         self.assertEqual(result["month"], 6)
         self.assertEqual(result["year"], 2026)
 
+    def test_detects_export_filename_year_month(self):
+        result = detect_period_from_text("Xuong2_2027-01_AnhBangLuong.zip")
+
+        self.assertEqual(result["month"], 1)
+        self.assertEqual(result["year"], 2027)
+
+    def test_detects_labeled_month_filename(self):
+        result = detect_period_from_text("cham cong T7 nam 2026.xlsx")
+
+        self.assertEqual(result["month"], 7)
+        self.assertEqual(result["year"], 2026)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -40,7 +40,10 @@ class LocalDriveDualSaveTests(unittest.TestCase):
                 )
 
             local_path = Path(result["local_path"])
-            self.assertEqual(local_path.parent, root / "local" / "Xuong2" / "08_BanChot_LichSu")
+            self.assertEqual(
+                local_path.parent,
+                root / "local" / "Xuong2" / "08_BanChot_LichSu" / "2026" / "Thang_07",
+            )
             self.assertEqual(local_path.read_bytes(), source.read_bytes())
             self.assertEqual(result["path"], str(drive_target))
 

@@ -312,6 +312,8 @@ def download_history_file(period_id: str, kind: str, user: dict = Depends(requir
         category,
         filename,
         factory=str(period.get("factory") or "factory1"),
+        month=int(period.get("month") or 0) or None,
+        year=int(period.get("year") or 0) or None,
     )
     return FileResponse(
         path,
@@ -356,6 +358,8 @@ def download_history_employee_images(period_id: str, kind: str, user: dict = Dep
         "employee_cards",
         filename,
         factory=factory,
+        month=month or None,
+        year=year or None,
     )
     return FileResponse(
         output_path,

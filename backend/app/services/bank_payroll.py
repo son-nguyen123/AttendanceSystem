@@ -806,6 +806,8 @@ def export_bank_excel_files(
         _build_ineligible_workbook(review_path, review_rows, month, year)
     return {
         "factory": snapshot["factory"],
+        "month": month,
+        "year": year,
         "salary_path": salary_path,
         "salary_filename": salary_filename,
         "review_path": review_path,
@@ -827,6 +829,8 @@ def export_bank_excel_local(
         "bank",
         files["salary_filename"],
         factory=files["factory"],
+        month=files["month"],
+        year=files["year"],
     )
     review_target = None
     if files["review_path"] is not None:
@@ -835,6 +839,8 @@ def export_bank_excel_local(
             "bank",
             files["review_filename"],
             factory=files["factory"],
+            month=files["month"],
+            year=files["year"],
         )
     return {
         "path": salary_target,

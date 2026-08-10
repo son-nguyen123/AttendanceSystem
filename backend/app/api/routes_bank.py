@@ -201,13 +201,22 @@ def export(request: ExportRequest, user: dict = Depends(require_owner)):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     path, filename = files["salary_path"], files["salary_filename"]
-    try_save_local_export_copy(path, "bank", filename, factory=files["factory"])
+    try_save_local_export_copy(
+        path,
+        "bank",
+        filename,
+        factory=files["factory"],
+        month=files["month"],
+        year=files["year"],
+    )
     if files["review_path"] is not None:
         try_save_local_export_copy(
             files["review_path"],
             "bank",
             files["review_filename"],
             factory=files["factory"],
+            month=files["month"],
+            year=files["year"],
         )
     return FileResponse(
         path,

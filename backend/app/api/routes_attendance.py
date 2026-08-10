@@ -513,7 +513,14 @@ async def convert_factory2_legacy_workbook(
     year = int(period.get("year") or 0)
     period_label = f"{year}-{month:02d}" if month and year else "KhongRoKy"
     filename = f"Xuong2_{period_label}_{'Output2_KhungMoi' if output_kind == 'output2' else 'Output1'}.xlsx"
-    try_save_local_export_copy(output_path, "conversion", filename, factory="factory2")
+    try_save_local_export_copy(
+        output_path,
+        "conversion",
+        filename,
+        factory="factory2",
+        month=month or None,
+        year=year or None,
+    )
     return FileResponse(
         output_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -554,7 +561,14 @@ async def convert_factory1_legacy_workbook(
     warning_count = reconciliation_warning_count(output_path)
     if warning_count:
         headers["X-Reconciliation-Warnings"] = str(warning_count)
-    try_save_local_export_copy(output_path, "conversion", "Xuong1_Output2_KhungMoi.xlsx", factory="factory1")
+    try_save_local_export_copy(
+        output_path,
+        "conversion",
+        "Xuong1_Output2_KhungMoi.xlsx",
+        factory="factory1",
+        month=int(period.get("month") or 0) or None,
+        year=int(period.get("year") or 0) or None,
+    )
     return FileResponse(
         output_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -836,7 +850,15 @@ async def map_owner_data(
         archive.write(output1_path, arcname=f"Output1{current_suffix}")
         archive.write(output2_path, arcname=f"Output2{current_suffix}")
 
-    try_save_local_export_copy(zip_path, "mapping", "Output1_Output2.zip", factory=factory)
+    period = detect_period_from_workbook(current_path)
+    try_save_local_export_copy(
+        zip_path,
+        "mapping",
+        "Output1_Output2.zip",
+        factory=factory,
+        month=int(period.get("month") or 0) or None,
+        year=int(period.get("year") or 0) or None,
+    )
     return FileResponse(
         zip_path,
         media_type="application/zip",

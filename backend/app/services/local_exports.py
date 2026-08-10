@@ -4,6 +4,7 @@ import shutil
 import zipfile
 import filecmp
 from pathlib import Path
+from typing import Any
 
 
 EXPORT_FOLDERS = {
@@ -38,6 +39,7 @@ def ensure_local_export_folders(
         for folder in trees[factory_key].values():
             folder.mkdir(parents=True, exist_ok=True)
     migrate_legacy_local_export_folders(base)
+    organize_existing_local_exports(base)
     return trees["factory2" if factory == "factory2" else "factory1"]
 
 
@@ -117,9 +119,14 @@ def save_local_export_copy(
     category: str,
     filename: str | None = None,
     factory: str | None = None,
+    month: int | None = None,
+    year: int | None = None,
 ) -> Path:
     folders = ensure_local_export_folders(factory=factory or "factory1")
-    target_dir = folders.get(category, Path(next(iter(folders.values()))).parent)
+    category_dir = folders.get(category, Path(next(iter(folders.values()))).parent)
+    detected_month, detected_year = detect_export_period(source, filename, month=month, year=year)
+    target_dir = period_export_directory(category_dir, detected_month, detected_year)
+    target_dir.mkdir(parents=True, exist_ok=True)
     desired = target_dir / (filename or source.name)
     target = _available_path(desired)
     shutil.copy2(source, target)
@@ -131,11 +138,114 @@ def try_save_local_export_copy(
     category: str,
     filename: str | None = None,
     factory: str | None = None,
+    month: int | None = None,
+    year: int | None = None,
 ) -> Path | None:
     try:
-        return save_local_export_copy(source, category, filename, factory=factory)
+        return save_local_export_copy(
+            source,
+            category,
+            filename,
+            factory=factory,
+            month=month,
+            year=year,
+        )
     except OSError:
         return None
+
+
+def period_export_directory(category_dir: Path, month: int | None, year: int | None) -> Path:
+    if _valid_period(month, year):
+        return category_dir / str(year) / f"Thang_{month:02d}"
+    return category_dir / "ChuaXacDinh"
+
+
+def detect_export_period(
+    source: Path,
+    filename: str | None = None,
+    *,
+    month: int | None = None,
+    year: int | None = None,
+) -> tuple[int | None, int | None]:
+    """Resolve an export period without guessing from the computer clock.
+
+    Explicit task data is authoritative. Workbook content is next, followed
+    by filenames. Unknown files stay isolated instead of being filed under an
+    incorrect current month.
+    """
+
+    explicit_month = _optional_int(month)
+    explicit_year = _optional_int(year)
+    if _valid_period(explicit_month, explicit_year):
+        return explicit_month, explicit_year
+
+    if source.suffix.lower() in {".xlsx", ".xlsm"} and source.is_file():
+        try:
+            from app.services.period_detector import detect_period_from_workbook
+
+            period = detect_period_from_workbook(source)
+            workbook_month = _optional_int(period.get("month"))
+            workbook_year = _optional_int(period.get("year"))
+            if _valid_period(workbook_month, workbook_year):
+                return workbook_month, workbook_year
+        except Exception:
+            pass
+
+    from app.services.period_detector import detect_period_from_text
+
+    for value in (filename, source.name, str(source.parent.name)):
+        period = detect_period_from_text(str(value or ""))
+        text_month = _optional_int(period.get("month"))
+        text_year = _optional_int(period.get("year"))
+        if _valid_period(text_month, text_year):
+            return text_month, text_year
+    return None, None
+
+
+def organize_existing_local_exports(root: Path | str) -> dict[str, list[dict[str, str]] | list[str]]:
+    """Move direct category files into year/month folders when period is certain."""
+
+    base = Path(root).expanduser().resolve()
+    moved: list[dict[str, str]] = []
+    unresolved: list[str] = []
+    failed: list[dict[str, str]] = []
+    for factory_folder in ("Xuong1", "Xuong2"):
+        for category, folder_name in EXPORT_FOLDERS.items():
+            category_dir = base / factory_folder / folder_name
+            if not category_dir.is_dir():
+                continue
+            for source in sorted(category_dir.iterdir(), key=lambda path: path.name.casefold()):
+                if not source.is_file() or source.name.startswith("~$"):
+                    continue
+                month, year = detect_export_period(source)
+                if not _valid_period(month, year):
+                    unresolved.append(str(source))
+                    continue
+                target_dir = period_export_directory(category_dir, month, year)
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target = _available_path(target_dir / source.name)
+                try:
+                    shutil.move(str(source), str(target))
+                    moved.append({
+                        "source": str(source),
+                        "target": str(target),
+                        "category": category,
+                        "factory": factory_folder,
+                    })
+                except OSError as exc:
+                    failed.append({"source": str(source), "target": str(target), "error": str(exc)})
+    return {"moved": moved, "unresolved": unresolved, "failed": failed}
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _valid_period(month: int | None, year: int | None) -> bool:
+    return isinstance(month, int) and 1 <= month <= 12 and isinstance(year, int) and 2000 <= year <= 9999
 
 
 def _available_path(path: Path) -> Path:

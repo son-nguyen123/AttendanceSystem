@@ -373,6 +373,8 @@ def run_period_excel_backup(detail: dict[str, Any], reason: str = "save_history"
             category,
             f"{prefix}_{label}{source.suffix}",
             factory=factory,
+            month=month,
+            year=year,
         )
         local_paths.append(str(local_target))
     result["local_paths"] = local_paths
@@ -405,6 +407,8 @@ def run_analysis_excel_copy(
         "history",
         Path(result["path"]).name,
         factory=factory,
+        month=month,
+        year=year,
     )
     result["local_path"] = str(local_target)
     _update_config(last_backup_at=_now(), last_backup_path=result["path"], last_backup_error=None)
@@ -446,6 +450,8 @@ def run_final_excel_copy(
         "history",
         Path(result["path"]).name,
         factory=factory,
+        month=month,
+        year=year,
     )
     result["local_path"] = str(local_target)
     _update_config(last_backup_at=_now(), last_backup_path=result["path"], last_backup_error=None)

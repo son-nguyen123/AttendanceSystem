@@ -5,7 +5,12 @@ from openpyxl import load_workbook
 
 
 PERIOD_PATTERN = re.compile(r"(?P<year>20\d{2})[-/.](?P<month>\d{1,2})[-/.]\d{1,2}")
-MONTH_YEAR_PATTERN = re.compile(r"(?:th[aá]ng\s*)?(?P<month>\d{1,2})\s*[/.-]\s*(?P<year>20\d{2})", re.IGNORECASE)
+YEAR_MONTH_PATTERN = re.compile(r"(?<!\d)(?P<year>20\d{2})\s*[-/.]\s*(?P<month>\d{1,2})(?!\d)")
+MONTH_YEAR_PATTERN = re.compile(r"(?:th(?:a|á)ng\s*)?(?P<month>\d{1,2})\s*[/.-]\s*(?P<year>20\d{2})", re.IGNORECASE)
+LABELED_MONTH_YEAR_PATTERN = re.compile(
+    r"(?:th(?:a|á)ng|thang|t)[\s_-]*(?P<month>\d{1,2})[^\d]{0,8}(?P<year>20\d{2})",
+    re.IGNORECASE,
+)
 
 
 def detect_period_from_workbook(path: Path) -> dict[str, int | str | None]:
@@ -51,11 +56,16 @@ def detect_period_from_sheet(ws) -> dict[str, int | str | None]:
 def detect_period_from_text(text: str) -> dict[str, int | str | None]:
     match = PERIOD_PATTERN.search(text)
     if not match:
-        reverse_match = MONTH_YEAR_PATTERN.search(text)
-        if not reverse_match:
-            return {"month": None, "year": None, "label": ""}
-        match = reverse_match
+        match = YEAR_MONTH_PATTERN.search(text)
+    if not match:
+        match = MONTH_YEAR_PATTERN.search(text)
+    if not match:
+        match = LABELED_MONTH_YEAR_PATTERN.search(text)
+    if not match:
+        return {"month": None, "year": None, "label": ""}
 
     year = int(match.group("year"))
     month = int(match.group("month"))
+    if month < 1 or month > 12:
+        return {"month": None, "year": None, "label": ""}
     return {"month": month, "year": year, "label": f"{month:02d}/{year}"}

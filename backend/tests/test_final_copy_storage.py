@@ -42,7 +42,7 @@ class FinalCopyStorageTests(unittest.TestCase):
                 result = drive_backup.delete_drive_period_files(config, month=6, year=2026)
 
             self.assertEqual(result["status"], "partial")
-            self.assertEqual(result["error_count"], 2)
+            self.assertEqual(result["error_count"], 3)
             self.assertTrue(all("Drive offline" in item["error"] for item in result["errors"]))
 
     def test_replacing_final_copy_keeps_only_newest_and_delete_is_individual(self) -> None:
@@ -81,7 +81,7 @@ class FinalCopyStorageTests(unittest.TestCase):
     def test_machine_delete_preserves_final_copy_folder(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            period_dir = root / "ExcelDaLuu" / "Xuong1" / "2026-06 - Thang 06 nam 2026"
+            period_dir = root / "ExcelDaLuu" / "Xuong1" / "2026" / "Thang_06"
             final_dir = period_dir / "BanSaoCuoiCung"
             final_dir.mkdir(parents=True)
             (period_dir / "01_output_1_cham_cong.xlsx").write_bytes(b"machine")
