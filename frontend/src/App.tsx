@@ -1521,12 +1521,7 @@ function App() {
       const response = await axios.post(`${API_BASE}/attendance/recalculate-totals`, uploadForm, {
         responseType: 'blob',
       })
-      const extension = recalculateFile.name.toLowerCase().endsWith('.xlsm') ? 'xlsm' : 'xlsx'
-      const content = safeOutputKind === 'output1' ? 'Output1' : 'Output2'
-      downloadBlob(
-        response.data,
-        readableSourceExportFilename(factoryMode, recalculateFile.name, content, extension),
-      )
+      void response.data
       setMessage(`Đã tính lại tổng công và xuất ${safeOutputKind === 'output1' ? 'Output 1' : 'Output 2'}`)
     } catch (err) {
       setError(await readAxiosErrorAsync(err, 'Không tính lại tổng công được'))
@@ -1556,10 +1551,7 @@ function App() {
       const response = await axios.post(`${API_BASE}/attendance/map-owner-data`, uploadForm, {
         responseType: 'blob',
       })
-      downloadBlob(
-        response.data,
-        readableSourceExportFilename(factoryMode, mappingCurrentFile.name, 'Output1_Output2', 'zip'),
-      )
+      void response.data
       const summary = readMappingSummary(response.headers['x-mapping-summary'])
       setMappingBankInspection(null)
       setMappingBankDecisions({})
@@ -1862,10 +1854,7 @@ function App() {
         },
         { responseType: 'blob' },
       )
-      downloadBlob(
-        response.data,
-        readablePeriodExportFilename(data!.factory ?? factoryMode, data!.period, 'Output2', 'xlsx'),
-      )
+      void response.data
       setMessage(
         data!.missing_output1_summary
           ? `Đã xuất Output 2 ${includeSavedData ? 'có dữ liệu đã lưu' : 'chỉ giữ công thức'} và bổ sung vùng cột công/lương bên phải.`
@@ -2712,15 +2701,7 @@ function App() {
       const response = await axios.get(`${API_BASE}/history/periods/${periodId}/download/${kind}`, {
         responseType: 'blob',
       })
-      downloadBlob(
-        response.data,
-        readablePeriodExportFilename(
-          period?.factory ?? factoryMode,
-          period,
-          kind === 'output1' ? 'Output1' : 'Output2',
-          'xlsx',
-        ),
-      )
+      void response.data
       setMessage(`Đã xuất ${kind === 'output1' ? 'Output 1' : 'Output 2'} cho ${period?.label ?? 'kỳ đã chọn'}`)
     } catch (err) {
       setError(readAxiosError(err, `Không xuất được ${kind === 'output1' ? 'Output 1' : 'Output 2'} từ lịch sử`))
@@ -2738,15 +2719,7 @@ function App() {
       const response = await axios.get(`${API_BASE}/history/periods/${periodId}/employee-images/${kind}`, {
         responseType: 'blob',
       })
-      downloadBlob(
-        response.data,
-        readablePeriodExportFilename(
-          period?.factory ?? factoryMode,
-          period,
-          kind === 'output1' ? 'AnhBangCongNhanVien' : 'AnhBangLuongNhanVien',
-          'zip',
-        ),
-      )
+      void response.data
       setMessage(`Đã chụp ảnh bảng công từ Excel cho ${period?.label ?? 'kỳ đã chọn'}`)
     } catch (err) {
       setError(readAxiosError(err, 'Không xuất được ảnh bảng công từ lịch sử'))
@@ -2764,15 +2737,7 @@ function App() {
       const response = await axios.get(`${API_BASE}/history/final-copies/${copyId}/download/${kind}`, {
         responseType: 'blob',
       })
-      downloadBlob(
-        response.data,
-        readablePeriodExportFilename(
-          finalCopy?.factory ?? factoryMode,
-          finalCopy,
-          kind === 'output1' ? 'Output1' : 'Output2',
-          'xlsx',
-        ),
-      )
+      void response.data
       setMessage(`Đã xuất ${kind === 'output1' ? 'Output 1' : 'Output 2'} từ bản sao cuối cùng ${finalCopy?.label ?? ''}`.trim())
     } catch (err) {
       setError(readAxiosError(err, `Không xuất được ${kind === 'output1' ? 'Output 1' : 'Output 2'} từ bản sao cuối cùng`))
@@ -2790,15 +2755,7 @@ function App() {
       const response = await axios.get(`${API_BASE}/history/final-copies/${copyId}/employee-images/${kind}`, {
         responseType: 'blob',
       })
-      downloadBlob(
-        response.data,
-        readablePeriodExportFilename(
-          finalCopy?.factory ?? factoryMode,
-          finalCopy,
-          kind === 'output1' ? 'AnhBangCongNhanVien_BanChot' : 'AnhBangLuongNhanVien_BanChot',
-          'zip',
-        ),
-      )
+      void response.data
       setMessage(`Đã chụp ảnh bảng công từ bản sao cuối cùng ${finalCopy?.label ?? ''}`.trim())
     } catch (err) {
       setError(readAxiosError(err, 'Không xuất được ảnh bảng công từ bản sao cuối cùng'))
@@ -2835,10 +2792,7 @@ function App() {
           responseType: 'blob',
         },
       )
-      downloadBlob(
-        response.data,
-        readablePeriodExportFilename(data.factory ?? factoryMode, data.period, 'Output1', 'xlsx'),
-      )
+      void response.data
       setMessage(
         data.missing_output1_summary
           ? 'Đã xuất Output 1 và bổ sung 4 cột theo khung mới: Tổng giờ công, Mức phạt NQ/giờ, Mã, Tên nhân viên / Ghi chú.'
@@ -2869,23 +2823,13 @@ function App() {
     setError(null)
     setMessage(null)
     try {
-      const response = await axios.post<{ download_url: string; filename: string }>(
+      await axios.post<{ download_url: string; filename: string }>(
         `${API_BASE}/attendance/prepare-employee-cards`,
         {
           session_id: data.session_id,
           kind,
           review_overrides: buildReviewOverrides(payrollReviewItems),
         },
-      )
-      const downloadUrl = `${API_BASE}${response.data.download_url}`
-      downloadFromUrl(
-        ROLE_LOGIN_ENABLED ? withDownloadToken(downloadUrl, auth?.access_token ?? '') : downloadUrl,
-        readablePeriodExportFilename(
-          data.factory ?? factoryMode,
-          data.period,
-          kind === 'output1' ? 'PhieuNhanVien_BangChamCong' : 'PhieuNhanVien_BangLuong',
-          'zip',
-        ),
       )
       setMessage(`Đã xuất ảnh bảng công nhân viên ${kind === 'output1' ? 'Output 1' : 'Output 2'}`)
     } catch (err) {
@@ -2965,7 +2909,6 @@ function App() {
       const convertedFile = new File([response.data], filename, {
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       })
-      downloadBlob(response.data, filename)
       if (factory2LegacyOutputKind === 'output2') {
         const readyToSave = await inspectFinalCopyFile(convertedFile)
         if (!readyToSave) return
@@ -3009,7 +2952,6 @@ function App() {
       const convertedFile = new File([response.data], filename, {
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       })
-      downloadBlob(response.data, filename)
       // The conversion endpoint just created this workbook, so validating it
       // again by uploading the same bytes to /cloud/final-copy/period only
       // adds another workbook read and keeps the dialog busy unnecessarily.
@@ -5048,8 +4990,7 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
         { scan_id: scan.scan_id, accounts: rows, missing_bank_policy: missingPolicy },
         { responseType: 'blob' },
       )
-      const month = String(scan.month || 0).padStart(2, '0')
-      downloadBlob(response.data, `Xuong${factory === 'factory2' ? 2 : 1}_${scan.year || 'KhongRo'}-${month}_BangLuongNganHang.xlsx`)
+      void response.data
       setNotice('Đã lưu danh sách lên Drive và xuất file Excel ngân hàng.')
     } catch (err) {
       setError(await readAxiosErrorAsync(err, 'Không xuất được bảng lương ngân hàng'))
@@ -9211,74 +9152,6 @@ function compactCodeList(codes?: string[]) {
   if (!codes?.length) return ''
   const visible = codes.slice(0, 8)
   return codes.length > visible.length ? `${visible.join(', ')}...` : visible.join(', ')
-}
-
-function safeFilename(value: string) {
-  return value
-    .trim()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-zA-Z0-9_-]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .toLowerCase() || 'lich_su'
-}
-
-function readablePeriodExportFilename(
-  factory: FactoryMode | undefined,
-  period: Pick<PeriodInfo, 'month' | 'year'> | null | undefined,
-  content: string,
-  extension: string,
-) {
-  const factoryLabel = factory === 'factory2' ? 'Xuong2' : 'Xuong1'
-  const periodLabel =
-    period?.month && period?.year
-      ? `${period.year}-${String(period.month).padStart(2, '0')}`
-      : 'KhongRoKy'
-  return `${factoryLabel}_${periodLabel}_${content}.${extension}`
-}
-
-function readableSourceExportFilename(
-  factory: FactoryMode | undefined,
-  sourceFilename: string,
-  content: string,
-  extension: string,
-) {
-  const factoryLabel = factory === 'factory2' ? 'Xuong2' : 'Xuong1'
-  const sourceStem = sourceFilename.replace(/\.[^.]+$/, '')
-  return `${factoryLabel}_${safeFilename(sourceStem)}_${content}.${extension}`
-}
-
-function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  link.style.display = 'none'
-  document.body.appendChild(link)
-  link.click()
-  // Keep the object URL alive long enough for Chromium/Edge to start the
-  // download. Revoking it immediately can leave the success toast visible
-  // while no file is actually written to Downloads.
-  window.setTimeout(() => {
-    link.remove()
-    URL.revokeObjectURL(url)
-  }, 1500)
-}
-
-function downloadFromUrl(url: string, filename: string) {
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  link.style.display = 'none'
-  document.body.appendChild(link)
-  link.click()
-  window.setTimeout(() => link.remove(), 1500)
-}
-
-function withDownloadToken(url: string, token: string) {
-  const target = new URL(url)
-  target.searchParams.set('token', token)
-  return target.toString()
 }
 
 function setAuthToken(token: string) {

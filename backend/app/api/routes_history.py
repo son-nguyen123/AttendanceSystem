@@ -20,6 +20,7 @@ from app.services.cloud_sync import (
     resolve_drive_final_copy,
     run_drive_backup,
     run_period_excel_backup,
+    save_local_export_copy,
     sync_enabled,
     sync_period_detail,
 )
@@ -302,6 +303,8 @@ def download_history_file(period_id: str, kind: str, user: dict = Depends(requir
         "output1": "Output1.xlsx",
         "output2": "Output2.xlsx",
     }
+    if kind in {"output1", "output2"}:
+        save_local_export_copy(path, kind, f"LichSu_{period_id[:16]}_{filename_by_kind[kind]}")
     return FileResponse(
         path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -333,10 +336,12 @@ def download_history_employee_images(period_id: str, kind: str, user: dict = Dep
     factory_label = "Xuong2" if period.get("factory") == "factory2" else "Xuong1"
     month = int(period.get("month") or 0)
     year = int(period.get("year") or 0)
+    filename = f"{factory_label}_{year}-{month:02d}_AnhBangCongNhanVien_{kind}.zip"
+    save_local_export_copy(output_path, "employee_cards", filename)
     return FileResponse(
         output_path,
         media_type="application/zip",
-        filename=f"{factory_label}_{year}-{month:02d}_AnhBangCongNhanVien_{kind}.zip",
+        filename=filename,
     )
 
 
@@ -350,10 +355,12 @@ def download_final_copy_file(copy_id: str, kind: str, user: dict = Depends(requi
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     if kind == "output2":
+        filename = f"LichSuBanSao_{copy_id[:16]}_Output2{source_path.suffix}"
+        save_local_export_copy(source_path, "output2", filename)
         return FileResponse(
             source_path,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            filename=f"Output2{source_path.suffix}",
+            filename=filename,
         )
 
     output_dir = STORAGE_DIR / "exports" / "final_copies"
@@ -362,10 +369,12 @@ def download_final_copy_file(copy_id: str, kind: str, user: dict = Depends(requi
         export_final_copy_output1(source_path, output_path)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Không tạo được Output 1 từ bản sao cuối cùng: {exc}") from exc
+    filename = f"LichSuBanSao_{copy_id[:16]}_Output1.xlsx"
+    save_local_export_copy(output_path, "output1", filename)
     return FileResponse(
         output_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename="Output1.xlsx",
+        filename=filename,
     )
 
 
@@ -403,10 +412,12 @@ def _download_final_copy_employee_images(copy_id: str, kind: str) -> FileRespons
             export_employee_screenshots_from_workbook(capture_source, output_path, kind)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Không xuất được ảnh bảng công từ bản sao cuối cùng: {exc}") from exc
+    filename = f"AnhBangCongNhanVien_{kind}_{source_path.stem}.zip"
+    save_local_export_copy(output_path, "employee_cards", filename)
     return FileResponse(
         output_path,
         media_type="application/zip",
-        filename=f"AnhBangCongNhanVien_{kind}_{source_path.stem}.zip",
+        filename=filename,
     )
 
 
