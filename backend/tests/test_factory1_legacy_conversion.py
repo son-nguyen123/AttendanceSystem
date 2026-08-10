@@ -3,7 +3,7 @@ import unittest
 
 from openpyxl import Workbook, load_workbook
 
-from app.services.factory1_workbook import export_factory1_legacy_output2
+from app.services.factory1_workbook import _select_sheet, export_factory1_legacy_output2, reconciliation_warning_count
 
 
 def _legacy_workbook(path: Path) -> None:
@@ -35,13 +35,28 @@ def _legacy_workbook(path: Path) -> None:
     sheet.cell(8, 39).value = 2.5
     sheet.cell(8, 40).value = 100000
     sheet.cell(8, 41).value = 500000
-    sheet.cell(8, 42).value = 3500000
+    sheet.cell(8, 42).value = -223750
+    sheet.cell(7, 34).value = "012345678901"
+    sheet.cell(7, 35).value = "Ghi chú hàng vàng"
     sheet.cell(9, 34).value = "T3/2023"
     sheet.cell(9, 35).value = "Ghi chú cũ"
     workbook.save(path)
 
 
 class Factory1LegacyConversionTests(unittest.TestCase):
+    def test_selects_complete_sheet_instead_of_a_duplicate_code_draft(self):
+        workbook = Workbook()
+        draft = workbook.active
+        draft.title = "Draft"
+        complete = workbook.create_sheet("Complete")
+        for sheet, codes in ((draft, ("1001", "1001")), (complete, ("1001", "1002"))):
+            for index, code in enumerate(codes):
+                top = index * 8 + 1
+                sheet.cell(top, 1).value = "Att. Time"
+                sheet.cell(top + 2, 1).value = "Mã:"
+                sheet.cell(top + 2, 3).value = code
+        self.assertEqual(_select_sheet(workbook).title, "Complete")
+
     def test_keeps_notes_and_writes_formulas(self):
         import tempfile
 
@@ -70,8 +85,10 @@ class Factory1LegacyConversionTests(unittest.TestCase):
             self.assertEqual(sheet["AQ7"].value, 500000)
             self.assertTrue(sheet["AP7"].value.startswith("=IF("))
             self.assertTrue(str(sheet["AI8"].value).startswith("Bắt đầu làm"))
-            self.assertEqual(sheet["AJ8"].value, "Ghi chú cũ")
-            self.assertIn(sheet["AI6"].value, (None, ""))
+            self.assertIn("Ghi chú hàng vàng", sheet["AJ8"].value)
+            self.assertIn("Ghi chú cũ", sheet["AJ8"].value)
+            self.assertEqual(sheet["AI6"].value, "012345678901")
+            self.assertIn(sheet["AH6"].value, (None, ""))
             self.assertTrue(sheet["AR7"].value.startswith("=IF("))
             self.assertEqual(sheet.parent.calculation.calcMode, "auto")
             self.assertTrue(sheet.parent.calculation.fullCalcOnLoad)
@@ -93,6 +110,8 @@ class Factory1LegacyConversionTests(unittest.TestCase):
             workbook = load_workbook(source)
             sheet = workbook.active
             sheet["D7"] = 9.75
+            sheet["D8"] = 8
+            sheet.cell(8, 42).value = -197500
             workbook.calculation.calcMode = "manual"
             workbook.calculation.fullCalcOnLoad = False
             workbook.calculation.forceFullCalc = False
@@ -103,6 +122,8 @@ class Factory1LegacyConversionTests(unittest.TestCase):
             converted = load_workbook(output, data_only=False)
             sheet = converted.active
             self.assertEqual(sheet["D7"].value, 9.75)
+            self.assertEqual(sheet["D8"].value, 8)
+            self.assertEqual(sheet["AN7"].value, 8)
             self.assertEqual(converted.calculation.calcMode, "auto")
             self.assertTrue(converted.calculation.fullCalcOnLoad)
             self.assertTrue(converted.calculation.forceFullCalc)
@@ -128,7 +149,7 @@ class Factory1LegacyConversionTests(unittest.TestCase):
             sheet.cell(3, 42).value = "Ứng Lương"
             sheet.cell(8, 42).value = 500000
             sheet.cell(3, 43).value = "Lương Tháng 05/2026"
-            sheet.cell(8, 43).value = 3500000
+            sheet.cell(8, 43).value = -323750
             workbook.save(source)
             workbook.close()
 
@@ -140,6 +161,81 @@ class Factory1LegacyConversionTests(unittest.TestCase):
             self.assertEqual(sheet["AQ7"].value, 500000)
             self.assertTrue(sheet["AR7"].value.startswith("=IF("))
             converted.close()
+        finally:
+            import shutil
+
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_recovers_overtime_and_bonus_when_old_headers_are_blank(self):
+        import tempfile
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="factory1-blank-headers-test-"))
+        try:
+            source = temp_dir / "legacy.xlsx"
+            output = temp_dir / "converted.xlsx"
+            _legacy_workbook(source)
+            workbook = load_workbook(source)
+            sheet = workbook.active
+            sheet.cell(3, 39).value = None
+            sheet.cell(3, 40).value = None
+            workbook.save(source)
+            workbook.close()
+
+            export_factory1_legacy_output2(source, output)
+            converted = load_workbook(output, data_only=False)
+            sheet = converted.active
+            self.assertEqual(sheet["AN7"].value, 2.5)
+            self.assertEqual(sheet["AO7"].value, 100000)
+            self.assertEqual(sheet["AQ7"].value, 500000)
+            converted.close()
+        finally:
+            import shutil
+
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_keeps_an_explicitly_blank_old_bonus_blank(self):
+        import tempfile
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="factory1-blank-bonus-test-"))
+        try:
+            source = temp_dir / "legacy.xlsx"
+            output = temp_dir / "converted.xlsx"
+            _legacy_workbook(source)
+            workbook = load_workbook(source)
+            sheet = workbook.active
+            sheet.cell(8, 40).value = None
+            sheet.cell(8, 42).value = -323750
+            workbook.save(source)
+            workbook.close()
+
+            export_factory1_legacy_output2(source, output)
+            converted = load_workbook(output, data_only=False)
+            self.assertIsNone(converted.active["AO7"].value)
+            converted.close()
+        finally:
+            import shutil
+
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_adds_a_review_sheet_when_old_final_conflicts_with_old_inputs(self):
+        import tempfile
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="factory1-reconciliation-test-"))
+        try:
+            source = temp_dir / "legacy.xlsx"
+            output = temp_dir / "converted.xlsx"
+            _legacy_workbook(source)
+            workbook = load_workbook(source)
+            workbook.active.cell(8, 42).value = 999999
+            workbook.save(source)
+            workbook.close()
+
+            export_factory1_legacy_output2(source, output)
+            converted = load_workbook(output, data_only=False)
+            self.assertIn("Đối chiếu chuyển khung", converted.sheetnames)
+            self.assertEqual(converted["Đối chiếu chuyển khung"]["A5"].value, "1001")
+            converted.close()
+            self.assertEqual(reconciliation_warning_count(output), 1)
         finally:
             import shutil
 

@@ -2,9 +2,9 @@
 
 The legacy Factory 1 files are usually old ``.xls`` Output 1 workbooks.  We
 read their semantic payroll summary first, then let the normal payroll writer
-create the current formula-driven summary.  This deliberately does not copy
-bank-account cells: the converted file is a payroll/history source, not a bank
-registry import.
+create the current formula-driven summary. The conversion preserves all
+owner-entered values from that historical month, including bank accounts and
+notes, while rebuilding calculated columns in the current formula frame.
 """
 
 from __future__ import annotations
@@ -14,8 +14,8 @@ import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-import xlrd
-from openpyxl import Workbook, load_workbook
+from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill
 
 from app.services.block_detector import detect_employee_blocks
 from app.services.data_mapper import (
@@ -24,6 +24,7 @@ from app.services.data_mapper import (
     _owner_records_by_code,
     _prepare_mapping_source_workbook,
 )
+from app.services.excel_compat import convert_xls_to_xlsx
 from app.services.payroll_store import normalize_employee_name
 from app.services.payroll_workbook import export_payroll_workbook
 from app.services.workbook_processor import export_processed_workbook
@@ -43,7 +44,7 @@ def export_factory1_legacy_output2(source_path: Path, output_path: Path) -> Path
     with TemporaryDirectory(prefix="factory1-legacy-") as temp_dir:
         prepared_path = Path(temp_dir) / "legacy.xlsx"
         if source_path.suffix.lower() == ".xls":
-            _convert_xls_to_xlsx(source_path, prepared_path)
+            convert_xls_to_xlsx(source_path, prepared_path)
         else:
             shutil.copy2(source_path, prepared_path)
 
@@ -77,13 +78,15 @@ def export_factory1_legacy_output2(source_path: Path, output_path: Path) -> Path
             formula_workbook=workbook,
             values_workbook=values_workbook,
         )
-        overtime = _legacy_overtime_by_code(source_sheet, values_sheet, records)
+        positional_values = _legacy_positional_payroll_values(source_sheet, values_sheet, records)
         historical_work_overrides = _legacy_work_overrides(source_sheet, values_sheet)
+        daily_overtime = _daily_overtime_totals(historical_work_overrides)
+        overtime = _legacy_overtime_by_code(source_sheet, values_sheet, records)
         workbook.close()
         values_workbook.close()
         source_values: dict[str, dict] = {}
         for code, record in records.items():
-            old_values = summary_values.get(code, {})
+            old_values = {**positional_values.get(code, {}), **summary_values.get(code, {})}
             # Keep identity/profile values from the old month.  Do not pass
             # old daily/hourly/final totals: the new frame must write formulas
             # for the new month's calculations.
@@ -92,12 +95,16 @@ def export_factory1_legacy_output2(source_path: Path, output_path: Path) -> Path
                 "start_work_note": record.start_work_note or "",
                 "note": record.note or "",
                 "monthly_salary": _number(record.salary),
-                "bonus": _number(record.bonus) if record.bonus is not None else _number(old_values.get("bonus")),
-                "overtime_hours": _number(old_values.get("overtime_hours")) if old_values.get("overtime_hours") is not None else overtime.get(code, 0),
-                # An explicit empty value prevents the normal payroll writer
-                # from filling a bank number from the local bank registry.
-                "bank_account": "",
+                "bonus": _number(old_values.get("bonus")) if "bonus" in old_values else _number(record.bonus),
+                "overtime_hours": daily_overtime.get(
+                    code,
+                    _number(old_values.get("overtime_hours")) if old_values.get("overtime_hours") is not None else overtime.get(code, 0),
+                ),
+                "bank_account": record.bank_account or "",
             }
+            legacy_final_salary = _number(old_values.get("final_salary"))
+            if legacy_final_salary is not None:
+                item["_legacy_final_salary"] = legacy_final_salary
             for key in ("penalty_rate", "nq_penalty", "advance_or_penalty"):
                 value = _number(old_values.get(key))
                 if value is not None:
@@ -114,7 +121,7 @@ def export_factory1_legacy_output2(source_path: Path, output_path: Path) -> Path
             review_overrides=historical_work_overrides,
             factory="factory1",
         )
-        return export_payroll_workbook(
+        converted_path = export_payroll_workbook(
             processed_path,
             output_path,
             include_saved_data=True,
@@ -122,45 +129,269 @@ def export_factory1_legacy_output2(source_path: Path, output_path: Path) -> Path
             source_payroll_values=source_values,
             source_is_processed=True,
         )
+        _verify_converted_output(converted_path, source_values, historical_work_overrides)
+        return converted_path
+
+
+def _legacy_positional_payroll_values(source_sheet, values_sheet, records: dict[str, object]) -> dict[str, dict]:
+    """Recover old inputs whose yellow overtime or bonus header is blank."""
+
+    result: dict[str, dict] = {}
+    max_col = source_sheet.max_column
+    for row in range(1, source_sheet.max_row + 1):
+        codes = {
+            code
+            for col in range(1, max_col + 1)
+            if (code := _normalize_employee_code(values_sheet.cell(row, col).value)) and code in records
+        }
+        if not codes:
+            continue
+
+        deduction_col = None
+        for header_row in range(max(1, row - 8), row):
+            for col in range(3, max_col + 1):
+                if _normalize_label(source_sheet.cell(header_row, col).value) in {
+                    "ung luong + phat",
+                    "ung luong va phat",
+                }:
+                    deduction_col = col
+                    break
+            if deduction_col is not None:
+                break
+        if deduction_col is None:
+            continue
+
+        for code in codes:
+            item = result.setdefault(code, {})
+            for key, col in (
+                ("overtime_hours", deduction_col - 2),
+                ("bonus", deduction_col - 1),
+                ("advance_or_penalty", deduction_col),
+            ):
+                raw_value = values_sheet.cell(row, col).value
+                if raw_value in (None, ""):
+                    raw_value = source_sheet.cell(row, col).value
+                # Keep a blank key explicit so a saved value from another
+                # payroll month is never inserted into this historical file.
+                item[key] = raw_value if raw_value not in (None, "") else None
+    return result
+
+
+def _verify_converted_output(
+    output_path: Path,
+    source_values: dict[str, dict],
+    historical_work_overrides: list[dict],
+) -> None:
+    """Fail the conversion if owner inputs or archived attendance were lost."""
+
+    workbook = load_workbook(output_path, data_only=False)
+    try:
+        sheet = _select_sheet(workbook)
+        blocks = {block.employee_code: block for block in detect_employee_blocks(sheet)}
+        errors: list[str] = []
+        final_mismatches: list[tuple[str, float, float, float]] = []
+
+        def same_value(expected: object, actual: object) -> bool:
+            expected_number = _number(expected)
+            actual_number = _number(actual)
+            if expected_number is not None or actual_number is not None:
+                return expected_number is not None and actual_number is not None and abs(float(expected_number) - float(actual_number)) < 0.0001
+            return str(expected or "").strip() == str(actual or "").strip()
+
+        for code, expected in source_values.items():
+            block = blocks.get(code)
+            if block is None:
+                errors.append(f"mất mã {code}")
+                continue
+            row = block.result_row
+            checks = {
+                "tên": (expected.get("name"), sheet.cell(row, 35).value),
+                "tài khoản": (expected.get("bank_account"), sheet.cell(row - 1, 35).value),
+                "mức lương": (expected.get("monthly_salary"), sheet.cell(row, 36).value),
+                "thưởng": (expected.get("bonus"), sheet.cell(row, 41).value),
+            }
+            if "overtime_hours" in expected and expected.get("overtime_hours") is not None:
+                checks["giờ làm thêm"] = (expected.get("overtime_hours"), sheet.cell(row, 40).value)
+            if "nq_penalty" in expected:
+                checks["phạt NQ"] = (expected.get("nq_penalty"), sheet.cell(row, 42).value)
+            if "advance_or_penalty" in expected:
+                checks["ứng/phạt"] = (expected.get("advance_or_penalty"), sheet.cell(row, 43).value)
+            for label, (wanted, actual) in checks.items():
+                if not same_value(wanted, actual):
+                    errors.append(f"mã {code} lệch {label}")
+
+            note_text = str(sheet.cell(block.header_row + 7, 36).value or "")
+            for label in ("start_work_note", "note"):
+                wanted_text = str(expected.get(label) or "").strip()
+                if wanted_text and label == "note" and wanted_text not in note_text:
+                    errors.append(f"mã {code} thiếu ghi chú")
+            for col in (37, 38, 39, 44):
+                if not str(sheet.cell(row, col).value or "").startswith("="):
+                    errors.append(f"mã {code} thiếu công thức cột {col}")
+
+            old_final_salary = _number(expected.get("_legacy_final_salary"))
+            salary = _number(sheet.cell(row, 36).value)
+            if old_final_salary is not None and salary is not None:
+                total_hours = sum(
+                    float(value)
+                    for col in range(1, 32)
+                    if (value := _number(sheet.cell(row, col).value)) is not None
+                )
+                overtime_hours = _number(sheet.cell(row, 40).value) or 0
+                bonus = _number(sheet.cell(row, 41).value) or 0
+                advance = _number(sheet.cell(row, 43).value) or 0
+                nq_penalty = _number(expected.get("nq_penalty"))
+                if nq_penalty is None:
+                    penalty_rate = _number(expected.get("penalty_rate")) or 0
+                    nq_penalty = penalty_rate * total_hours
+                calculated_final = (
+                    salary / 26 * (total_hours / 8)
+                    + overtime_hours * (salary / 208) * 1.5
+                    + bonus
+                    - nq_penalty
+                    - advance
+                )
+                if abs(float(old_final_salary) - calculated_final) > 0.02:
+                    final_mismatches.append(
+                        (code, float(old_final_salary), calculated_final, calculated_final - float(old_final_salary))
+                    )
+
+        for override in historical_work_overrides:
+            code = str(override.get("employee_code") or "").strip()
+            block = blocks.get(code)
+            if block is None:
+                continue
+            day = override.get("day")
+            day_col = override.get("source_column")
+            if not isinstance(day_col, int) or not 1 <= day_col <= 31:
+                day_col = next(
+                    (
+                        col
+                        for col in range(1, 32)
+                        if _number(sheet.cell(block.day_row, col).value) == _number(day)
+                    ),
+                    None,
+                )
+            if "work_value" in override and (day_col is None or not same_value(
+                override.get("work_value"),
+                sheet.cell(block.result_row, day_col).value if day_col else None,
+            )):
+                errors.append(f"mã {code} lệch công ngày {day}")
+            if "overtime_value" in override and day_col is not None and not same_value(
+                override.get("overtime_value"),
+                sheet.cell(block.result_row + 1, day_col).value,
+            ):
+                errors.append(f"mã {code} lệch tăng ca ngày {day}")
+
+        if errors:
+            preview = "; ".join(errors[:12])
+            suffix = f"; và {len(errors) - 12} lỗi khác" if len(errors) > 12 else ""
+            raise ValueError(f"Đối chiếu bảng khung mới không đạt: {preview}{suffix}")
+        if final_mismatches:
+            _write_reconciliation_report(workbook, final_mismatches)
+            workbook.save(output_path)
+    finally:
+        workbook.close()
+
+
+def _write_reconciliation_report(workbook, mismatches: list[tuple[str, float, float, float]]) -> None:
+    """Add a visible review sheet when the old total conflicts with its inputs."""
+
+    title = "Đối chiếu chuyển khung"
+    if title in workbook.sheetnames:
+        del workbook[title]
+    sheet = workbook.create_sheet(title)
+    sheet["A1"] = "CẢNH BÁO ĐỐI CHIẾU LƯƠNG CŨ"
+    sheet["A2"] = (
+        "Các dòng dưới đây có Lương Tháng cũ không khớp với chính dữ liệu lương/thưởng/ứng-phạt cũ. "
+        "Khung mới đã giữ nguyên các dữ liệu đầu vào và dùng công thức chuẩn, vì vậy kết quả tính lại có chênh lệch."
+    )
+    sheet.merge_cells("A2:E2")
+    headers = ["Mã", "Lương Tháng cũ", "Khung mới tính lại", "Chênh lệch", "Cần kiểm tra"]
+    for col, value in enumerate(headers, start=1):
+        cell = sheet.cell(4, col, value)
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill("solid", fgColor="FFFF00")
+    for row, (code, old_value, new_value, difference) in enumerate(mismatches, start=5):
+        sheet.cell(row, 1, code)
+        sheet.cell(row, 2, old_value)
+        sheet.cell(row, 3, new_value)
+        sheet.cell(row, 4, difference)
+        sheet.cell(row, 5, "Kiểm tra lại cách bảng cũ dùng cột Ứng Lương + Phạt")
+        for col in range(2, 5):
+            sheet.cell(row, col).number_format = "#,##0.##"
+    sheet.freeze_panes = "A5"
+    for column, width in {"A": 14, "B": 20, "C": 20, "D": 18, "E": 58}.items():
+        sheet.column_dimensions[column].width = width
+
+
+def reconciliation_warning_count(output_path: Path) -> int:
+    """Return the number of review rows attached to a converted workbook."""
+
+    workbook = load_workbook(output_path, read_only=True, data_only=False)
+    try:
+        title = "Đối chiếu chuyển khung"
+        return max(0, workbook[title].max_row - 4) if title in workbook.sheetnames else 0
+    finally:
+        workbook.close()
 
 
 def _legacy_work_overrides(source_sheet, values_sheet) -> list[dict]:
-    """Keep the archived daily work values when rebuilding an old month."""
+    """Keep archived daily work and overtime values when rebuilding a month."""
     overrides: list[dict] = []
     for block in detect_employee_blocks(source_sheet):
         for column in range(1, 32):
             day = source_sheet.cell(block.day_row, column).value
             if isinstance(day, bool):
                 continue
-            if isinstance(day, float) and day.is_integer():
-                day = int(day)
             if not isinstance(day, int) or not 1 <= day <= 31:
                 continue
 
             work_value = values_sheet.cell(block.result_row, column).value
             if work_value in (None, ""):
                 work_value = source_sheet.cell(block.result_row, column).value
-            if work_value in (None, ""):
+            overtime_value = values_sheet.cell(block.result_row + 1, column).value
+            if overtime_value in (None, ""):
+                overtime_value = source_sheet.cell(block.result_row + 1, column).value
+            if work_value in (None, "") and overtime_value in (None, ""):
                 continue
-            overrides.append(
-                {
-                    "employee_code": block.employee_code,
-                    "day": day,
-                    "work_value": work_value,
-                }
-            )
+            item = {"employee_code": block.employee_code, "day": day, "source_column": column}
+            if work_value not in (None, ""):
+                item["work_value"] = work_value
+            if overtime_value not in (None, ""):
+                item["overtime_value"] = overtime_value
+            overrides.append(item)
     return overrides
+
+
+def _daily_overtime_totals(overrides: list[dict]) -> dict[str, int | float]:
+    totals: dict[str, float] = {}
+    for item in overrides:
+        if "overtime_value" not in item:
+            continue
+        code = str(item.get("employee_code") or "").strip()
+        value = _number(item.get("overtime_value"))
+        if code and value is not None:
+            totals[code] = totals.get(code, 0) + float(value)
+    return {code: int(total) if total.is_integer() else total for code, total in totals.items()}
 
 
 def _select_sheet(workbook):
     best = None
-    best_count = -1
+    best_score = (-1, -1, -1)
     for worksheet in workbook.worksheets:
-        count = sum(1 for row in range(1, worksheet.max_row + 1) if str(worksheet.cell(row, 1).value or "").strip() == "Att. Time")
-        if count > best_count:
+        blocks = detect_employee_blocks(worksheet)
+        codes = [block.employee_code for block in blocks]
+        unique_count = len(set(codes))
+        duplicate_count = len(codes) - unique_count
+        # Prefer the sheet containing the most distinct employees. This is
+        # essential for workbooks that retain an older draft sheet with the
+        # same block count but duplicated employee codes.
+        score = (unique_count, -duplicate_count, len(blocks))
+        if score > best_score:
             best = worksheet
-            best_count = count
-    if best is None or best_count <= 0:
+            best_score = score
+    if best is None or best_score[0] <= 0:
         raise ValueError("KhÃ´ng tÃ¬m tháº¥y sheet cháº¥m cÃ´ng cÅ© XÆ°á»Ÿng 1")
     return best
 
@@ -216,41 +447,3 @@ def _number(value: object) -> int | float | None:
     except ValueError:
         return None
     return int(number) if number.is_integer() else number
-
-
-def _convert_xls_to_xlsx(source_path: Path, output_path: Path) -> None:
-    """Convert values from BIFF8 ``.xls`` while dropping style-only tail rows."""
-
-    book = xlrd.open_workbook(str(source_path), formatting_info=False)
-    workbook = Workbook()
-    workbook.remove(workbook.active)
-    for sheet_index, sheet_name in enumerate(book.sheet_names()):
-        source_sheet = book.sheet_by_index(sheet_index)
-        target = workbook.create_sheet(_safe_sheet_title(sheet_name, sheet_index))
-        # Old attendance workbooks often carry thousands of formatted but
-        # empty rows below the actual table. ``xlrd`` exposes those rows in
-        # ``nrows``; trim the meaningful tail before copying values so the
-        # conversion does not scan blank cells twice.
-        last_row = source_sheet.nrows
-        while last_row > 0 and not any(value not in (None, "") for value in source_sheet.row_values(last_row - 1)):
-            last_row -= 1
-        for row_index in range(last_row):
-            row_values = source_sheet.row_values(row_index)
-            for col_index, raw_value in enumerate(row_values):
-                if raw_value in (None, ""):
-                    continue
-                cell = source_sheet.cell(row_index, col_index)
-                value = cell.value
-                if cell.ctype == xlrd.XL_CELL_DATE:
-                    value = xlrd.xldate_as_datetime(value, book.datemode)
-                elif cell.ctype in {xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK, xlrd.XL_CELL_ERROR}:
-                    value = None
-                if value not in (None, ""):
-                    target.cell(row=row_index + 1, column=col_index + 1).value = value
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    workbook.save(output_path)
-
-
-def _safe_sheet_title(value: str, index: int) -> str:
-    title = "".join(char for char in str(value or "Sheet") if char not in "[]:*?/\\")[:31] or f"Sheet{index + 1}"
-    return title

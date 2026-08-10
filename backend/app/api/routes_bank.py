@@ -1,18 +1,21 @@
 from pathlib import Path
 import shutil
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app.api.auth_dependencies import require_owner
+from app.services.excel_compat import EXCEL_UPLOAD_SUFFIXES, ensure_openpyxl_workbook
+from app.services.local_exports import try_save_local_export_copy
 from app.services.bank_payroll import (
     backup_registry_to_drive,
     bank_status,
     detect_excel_salary_period,
     detect_word_period,
-    export_bank_excel,
+    export_bank_excel_files,
     export_bank_excel_local,
     import_accounts_from_excel_salary,
     import_accounts_from_word,
@@ -34,6 +37,7 @@ class AccountRow(BaseModel):
     account_number: str = ""
     conflict_accounts: list[str] = Field(default_factory=list)
     conflict_codes: list[str] = Field(default_factory=list)
+    salary: float | None = None
 
 
 class AccountSaveRequest(BaseModel):
@@ -44,6 +48,7 @@ class AccountSaveRequest(BaseModel):
 class ExportRequest(BaseModel):
     scan_id: str
     accounts: list[AccountRow] = Field(default_factory=list)
+    missing_account_mode: Literal["require_all", "with_account_only", "leave_blank"] = "require_all"
 
 
 @router.get("/accounts")
@@ -71,12 +76,13 @@ def scan(
     user: dict = Depends(require_owner),
 ):
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".xlsx", ".xlsm"}:
-        raise HTTPException(status_code=400, detail="Chỉ nhận file Excel .xlsx hoặc .xlsm.")
+    if suffix not in EXCEL_UPLOAD_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Chỉ nhận file Excel .xls, .xlsx hoặc .xlsm.")
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     target = UPLOAD_DIR / f"{uuid.uuid4().hex}{suffix}"
     with target.open("wb") as output:
         shutil.copyfileobj(file.file, output)
+    target = ensure_openpyxl_workbook(target, target.with_suffix(".xlsx"))
     try:
         return scan_official_workbook(target, factory)
     except ValueError as exc:
@@ -142,12 +148,13 @@ def import_excel_salary(
     user: dict = Depends(require_owner),
 ):
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".xlsx", ".xlsm"}:
-        raise HTTPException(status_code=400, detail="Chỉ nhận file Excel lương .xlsx hoặc .xlsm.")
+    if suffix not in EXCEL_UPLOAD_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Chỉ nhận file Excel lương .xls, .xlsx hoặc .xlsm.")
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     target = UPLOAD_DIR / f"{uuid.uuid4().hex}{suffix}"
     with target.open("wb") as output:
         shutil.copyfileobj(file.file, output)
+    target = ensure_openpyxl_workbook(target, target.with_suffix(".xlsx"))
     try:
         # The old salary file is a supplementary account source.  It never
         # performs a blanket replacement; conflicts are returned for an
@@ -167,12 +174,13 @@ def inspect_excel_salary(
     user: dict = Depends(require_owner),
 ):
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".xlsx", ".xlsm"}:
-        raise HTTPException(status_code=400, detail="Chỉ nhận file Excel lương .xlsx hoặc .xlsm.")
+    if suffix not in EXCEL_UPLOAD_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Chỉ nhận file Excel lương .xls, .xlsx hoặc .xlsm.")
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     target = UPLOAD_DIR / f"{uuid.uuid4().hex}{suffix}"
     with target.open("wb") as output:
         shutil.copyfileobj(file.file, output)
+    target = ensure_openpyxl_workbook(target, target.with_suffix(".xlsx"))
     try:
         month, year = detect_excel_salary_period(target)
         return {"month": month, "year": year}
@@ -185,12 +193,22 @@ def inspect_excel_salary(
 @router.post("/export")
 def export(request: ExportRequest, user: dict = Depends(require_owner)):
     try:
-        path, filename = export_bank_excel(
+        files = export_bank_excel_files(
             request.scan_id,
             [row.model_dump() for row in request.accounts],
+            request.missing_account_mode,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    path, filename = files["salary_path"], files["salary_filename"]
+    try_save_local_export_copy(path, "bank", filename, factory=files["factory"])
+    if files["review_path"] is not None:
+        try_save_local_export_copy(
+            files["review_path"],
+            "bank",
+            files["review_filename"],
+            factory=files["factory"],
+        )
     return FileResponse(
         path,
         filename=filename,
@@ -201,13 +219,17 @@ def export(request: ExportRequest, user: dict = Depends(require_owner)):
 @router.post("/export-local")
 def export_local(request: ExportRequest, user: dict = Depends(require_owner)):
     try:
-        path, filename = export_bank_excel_local(
+        result = export_bank_excel_local(
             request.scan_id,
             [row.model_dump() for row in request.accounts],
+            request.missing_account_mode,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"status": "ok", "path": str(path), "filename": filename}
+    return {
+        "status": "ok",
+        **{key: str(value) if isinstance(value, Path) else value for key, value in result.items()},
+    }
 
 
 @router.get("/status")

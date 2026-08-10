@@ -21,11 +21,46 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from app.services.cloud_sync import get_cloud_config
 from app.services.bank_account_store import find_duplicate_account_groups, normalize_account_number
 from app.services.payroll_store import normalize_employee_name
+from app.services.local_exports import save_local_export_copy
 
 
 STORAGE_DIR = Path(__file__).resolve().parents[2] / "storage"
 REGISTRY_PATH = STORAGE_DIR / "bank_accounts.json"
 SESSION_DIR = STORAGE_DIR / "bank_payroll"
+
+FIXED_BANK_EMPLOYEE = {
+    "employee_code": "1",
+    "name": "HUYNH VAN CAO",
+    "account_number": "5601632718",
+    "salary": 0,
+    "work_days": 0,
+    "salary_eligible": True,
+    "is_fixed": True,
+    "salary_editable": True,
+}
+
+
+def _cell_has_green_font(cell: Any) -> bool:
+    """Return True only for explicit green RGB font colors.
+
+    Output 2 uses a red employee code for people eligible for salary and a
+    green code for people who are not eligible.  Ignore theme/indexed colors
+    because those are also used by ordinary template text.
+    """
+
+    color = getattr(getattr(cell, "font", None), "color", None)
+    if color is None or getattr(color, "type", None) != "rgb":
+        return False
+    raw = str(getattr(color, "rgb", "") or "").replace("#", "")
+    if len(raw) == 8:
+        raw = raw[-6:]
+    if len(raw) != 6:
+        return False
+    try:
+        red, green, blue = int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16)
+    except ValueError:
+        return False
+    return green >= 80 and green > red * 1.2 and green > blue * 1.2
 
 
 def scan_official_workbook(path: Path, factory: str) -> dict[str, Any]:
@@ -84,6 +119,9 @@ def scan_official_workbook(path: Path, factory: str) -> dict[str, Any]:
                     "name": name,
                     "salary": round(float(salary or 0)),
                     "work_days": round(float(work_days or 0), 2),
+                    "salary_eligible": not _cell_has_green_font(formula_ws.cell(result_row, fields["code"])),
+                    "is_fixed": False,
+                    "salary_editable": False,
                 }
     finally:
         values_wb.close()
@@ -111,6 +149,22 @@ def scan_official_workbook(path: Path, factory: str) -> dict[str, Any]:
         item["conflict_accounts"] = list(saved.get("conflict_accounts") or [])
         item["conflict_codes"] = duplicate_codes.get(item["employee_code"], [])
 
+    # This administrative transfer is required every month even when code 1
+    # is absent from Output 2.  It is deliberately first and its salary alone
+    # can be entered manually in the UI.
+    if factory == "factory1":
+        employees.pop(FIXED_BANK_EMPLOYEE["employee_code"], None)
+        fixed_employee = {
+            **FIXED_BANK_EMPLOYEE,
+            "conflict_accounts": [],
+            "conflict_codes": [],
+        }
+        all_employees = [fixed_employee, *employees.values()]
+    else:
+        all_employees = list(employees.values())
+    transfer_employees = [item for item in all_employees if item.get("salary_eligible", True)]
+    ineligible_employees = [item for item in all_employees if not item.get("salary_eligible", True)]
+
     scan_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
     snapshot = {
@@ -119,10 +173,15 @@ def scan_official_workbook(path: Path, factory: str) -> dict[str, Any]:
         "month": month,
         "year": year,
         "source_filename": path.name,
-        "employees": list(employees.values()),
+        "employees": all_employees,
     }
     _atomic_json(SESSION_DIR / f"{scan_id}.json", snapshot)
-    return snapshot
+    return {
+        **snapshot,
+        "employees": transfer_employees,
+        "ineligible_employees": ineligible_employees,
+        "ineligible_count": len(ineligible_employees),
+    }
 
 
 def list_accounts(factory: str) -> dict[str, Any]:
@@ -591,7 +650,11 @@ def detect_word_period(path: Path) -> tuple[int | None, int | None]:
     return None, None
 
 
-def export_bank_docx(scan_id: str, account_overrides: list[dict[str, Any]] | None = None) -> tuple[Path, str]:
+def export_bank_docx(
+    scan_id: str,
+    account_overrides: list[dict[str, Any]] | None = None,
+    missing_account_mode: str = "require_all",
+) -> tuple[Path, str]:
     snapshot_path = SESSION_DIR / f"{scan_id}.json"
     if not snapshot_path.exists():
         raise ValueError("Phiên quét bảng lương không còn tồn tại. Hãy quét lại file.")
@@ -617,7 +680,9 @@ def export_bank_docx(scan_id: str, account_overrides: list[dict[str, Any]] | Non
         else:
             seen_accounts[account] = item["employee_code"]
         employees.append({**item, "account_number": account})
-    if missing:
+    if missing and missing_account_mode == "with_account_only":
+        employees = [item for item in employees if item.get("account_number")]
+    elif missing and missing_account_mode != "leave_blank":
         raise ValueError("Chưa có số tài khoản cho mã: " + ", ".join(missing[:12]))
     if duplicates:
         raise ValueError("Phát hiện số tài khoản trùng ở mã: " + ", ".join(duplicates[:8]))
@@ -632,68 +697,152 @@ def export_bank_docx(scan_id: str, account_overrides: list[dict[str, Any]] | Non
     return output, filename
 
 
-def export_bank_excel(scan_id: str, account_overrides: list[dict[str, Any]] | None = None) -> tuple[Path, str]:
+def export_bank_excel(
+    scan_id: str,
+    account_overrides: list[dict[str, Any]] | None = None,
+    missing_account_mode: str = "require_all",
+) -> tuple[Path, str]:
     """Export the scanned payroll rows as the bank's Excel payment layout.
 
     The account validation is intentionally the same as the legacy Word
     export.  The resulting workbook follows the user's bank template:
     employee code, name, account number, transfer amount and payment note.
     """
-    snapshot_path = SESSION_DIR / f"{scan_id}.json"
-    if not snapshot_path.exists():
-        raise ValueError("PhiÃªn quÃ©t báº£ng lÆ°Æ¡ng khÃ´ng cÃ²n tá»“n táº¡i. HÃ£y quÃ©t láº¡i file.")
-    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    files = export_bank_excel_files(scan_id, account_overrides, missing_account_mode)
+    return files["salary_path"], files["salary_filename"]
+
+
+def _missing_reason(name: str, account: str) -> str:
+    reasons = []
+    if not name:
+        reasons.append("Thiếu họ tên")
+    if not account:
+        reasons.append("Thiếu số tài khoản")
+    return "; ".join(reasons)
+
+
+def _prepare_bank_export_rows(
+    snapshot: dict[str, Any],
+    account_overrides: list[dict[str, Any]] | None,
+    missing_account_mode: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     factory = snapshot["factory"]
     registry = _load_registry()
-    overrides = {
-        _employee_code(row.get("employee_code")): normalize_account_number(row.get("account_number"))
+    override_rows = {
+        _employee_code(row.get("employee_code")): row
         for row in (account_overrides or [])
         if _employee_code(row.get("employee_code"))
     }
-    employees = []
-    missing = []
+    transfer_rows: list[dict[str, Any]] = []
+    review_rows: list[dict[str, Any]] = []
+
+    for source in snapshot["employees"]:
+        code = _employee_code(source.get("employee_code"))
+        override = override_rows.get(code, {})
+        saved = registry.get(_key(factory, code), {})
+        if source.get("is_fixed"):
+            name = FIXED_BANK_EMPLOYEE["name"]
+            account = FIXED_BANK_EMPLOYEE["account_number"]
+            salary = max(0, round(float(_number(override.get("salary")) or 0)))
+        else:
+            name = normalize_employee_name(source.get("name"))
+            account = normalize_account_number(
+                override.get("account_number", saved.get("account_number"))
+            )
+            salary = round(float(_number(source.get("salary")) or 0))
+
+        row = {**source, "employee_code": code, "name": name, "account_number": account, "salary": salary}
+        if not source.get("salary_eligible", True):
+            review_rows.append({**row, "reason": "Chưa đủ điều kiện nhận lương"})
+            continue
+
+        missing_reason = _missing_reason(name, account)
+        if missing_account_mode == "with_account_only" and missing_reason:
+            review_rows.append({**row, "reason": missing_reason})
+            continue
+        if missing_account_mode == "leave_blank" and not name and not account:
+            review_rows.append({**row, "reason": missing_reason})
+            continue
+        if missing_account_mode == "require_all" and missing_reason:
+            raise ValueError(f"Mã {code} chưa đủ thông tin: {missing_reason.lower()}.")
+        transfer_rows.append(row)
+
     seen_accounts: dict[str, str] = {}
     duplicates = []
-    for item in snapshot["employees"]:
-        saved = registry.get(_key(factory, item["employee_code"]), {})
-        account = overrides.get(item["employee_code"], normalize_account_number(saved.get("account_number")))
+    for row in transfer_rows:
+        account = row.get("account_number") or ""
         if not account:
-            missing.append(item["employee_code"])
-        elif account in seen_accounts:
-            duplicates.append(f"{seen_accounts[account]} vÃ  {item['employee_code']}")
+            continue
+        if account in seen_accounts:
+            duplicates.append(f"{seen_accounts[account]} và {row['employee_code']}")
         else:
-            seen_accounts[account] = item["employee_code"]
-        employees.append({**item, "account_number": account})
-    if missing:
-        raise ValueError("ChÆ°a cÃ³ sá»‘ tÃ i khoáº£n cho mÃ£: " + ", ".join(missing[:12]))
+            seen_accounts[account] = row["employee_code"]
     if duplicates:
-        raise ValueError("PhÃ¡t hiá»‡n sá»‘ tÃ i khoáº£n trÃ¹ng á»Ÿ mÃ£: " + ", ".join(duplicates[:8]))
+        raise ValueError("Phát hiện số tài khoản trùng ở mã: " + ", ".join(duplicates[:8]))
+    return transfer_rows, review_rows
 
-    month = snapshot.get("month")
-    year = snapshot.get("year")
-    factory_no = "2" if factory == "factory2" else "1"
-    filename = f"Xuong{factory_no}_{year or 'KhongRo'}-{int(month or 0):02d}_BangLuongNganHang.xlsx"
-    output = SESSION_DIR / f"{scan_id}_{filename}"
-    _build_bank_workbook(output, employees, month, year)
-    return output, filename
+
+def export_bank_excel_files(
+    scan_id: str,
+    account_overrides: list[dict[str, Any]] | None = None,
+    missing_account_mode: str = "require_all",
+) -> dict[str, Any]:
+    snapshot_path = SESSION_DIR / f"{scan_id}.json"
+    if not snapshot_path.exists():
+        raise ValueError("Phiên quét bảng lương không còn tồn tại. Hãy quét lại file.")
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    transfer_rows, review_rows = _prepare_bank_export_rows(snapshot, account_overrides, missing_account_mode)
+    month, year = snapshot.get("month"), snapshot.get("year")
+    factory_no = "2" if snapshot["factory"] == "factory2" else "1"
+    prefix = f"Xuong{factory_no}_{year or 'KhongRo'}-{int(month or 0):02d}"
+    salary_filename = f"{prefix}_BangLuongNganHang.xlsx"
+    salary_path = SESSION_DIR / f"{scan_id}_{salary_filename}"
+    _build_bank_workbook(salary_path, transfer_rows, month, year)
+
+    review_filename = review_path = None
+    if review_rows:
+        review_filename = f"{prefix}_ChuaDuDieuKienNhanLuong.xlsx"
+        review_path = SESSION_DIR / f"{scan_id}_{review_filename}"
+        _build_ineligible_workbook(review_path, review_rows, month, year)
+    return {
+        "factory": snapshot["factory"],
+        "salary_path": salary_path,
+        "salary_filename": salary_filename,
+        "review_path": review_path,
+        "review_filename": review_filename,
+        "review_count": len(review_rows),
+    }
 
 
 def export_bank_excel_local(
     scan_id: str,
     account_overrides: list[dict[str, Any]] | None = None,
-) -> tuple[Path, str]:
+    missing_account_mode: str = "require_all",
+) -> dict[str, Any]:
     """Create the bank workbook and copy it to the configured local folder."""
 
-    source_path, filename = export_bank_excel(scan_id, account_overrides)
-    config = get_cloud_config()
-    raw_directory = str(config.get("local_export_dir") or (STORAGE_DIR / "local_exports"))
-    target_directory = Path(raw_directory).expanduser()
-    if not target_directory.is_absolute():
-        target_directory = (STORAGE_DIR / target_directory).resolve()
-    target_directory.mkdir(parents=True, exist_ok=True)
-    target_path = target_directory / filename
-    shutil.copy2(source_path, target_path)
-    return target_path, filename
+    files = export_bank_excel_files(scan_id, account_overrides, missing_account_mode)
+    salary_target = save_local_export_copy(
+        files["salary_path"],
+        "bank",
+        files["salary_filename"],
+        factory=files["factory"],
+    )
+    review_target = None
+    if files["review_path"] is not None:
+        review_target = save_local_export_copy(
+            files["review_path"],
+            "bank",
+            files["review_filename"],
+            factory=files["factory"],
+        )
+    return {
+        "path": salary_target,
+        "filename": files["salary_filename"],
+        "review_path": review_target,
+        "review_filename": files["review_filename"],
+        "review_count": files["review_count"],
+    }
 
 
 def backup_registry_to_drive(factory: str = "factory1") -> dict[str, Any]:
@@ -958,6 +1107,69 @@ def _build_bank_workbook(
         worksheet.cell(row=total_row, column=column).border = border
 
     worksheet.freeze_panes = "A4"
+    workbook.save(path)
+
+
+def _build_ineligible_workbook(
+    path: Path,
+    employees: list[dict[str, Any]],
+    month: int | None,
+    year: int | None,
+) -> None:
+    """Create the review list without exposing salary amounts."""
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "ChuaDuDieuKien"
+    worksheet.sheet_view.showGridLines = False
+    worksheet.merge_cells("A1:D1")
+    worksheet["A1"] = (
+        f"DANH SÁCH CHƯA ĐỦ ĐIỀU KIỆN NHẬN LƯƠNG - THÁNG {month}/{year}"
+        if month and year
+        else "DANH SÁCH CHƯA ĐỦ ĐIỀU KIỆN NHẬN LƯƠNG"
+    )
+    worksheet["A1"].font = Font(name="Arial", size=14, bold=True, color="FFFFFF")
+    worksheet["A1"].fill = PatternFill("solid", fgColor="1F4E78")
+    worksheet["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    worksheet.row_dimensions[1].height = 30
+
+    headers = ["MÃ NHÂN VIÊN", "HỌ TÊN", "SỐ TÀI KHOẢN", "LÝ DO"]
+    thin = Side(style="thin", color="B7C9D6")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for column, title in enumerate(headers, start=1):
+        cell = worksheet.cell(row=2, column=column, value=title)
+        cell.font = Font(name="Arial", size=10, bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="5B9BD5")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = border
+
+    for row_number, employee in enumerate(employees, start=3):
+        values = [
+            _employee_code(employee.get("employee_code")),
+            normalize_employee_name(employee.get("name")),
+            normalize_account_number(employee.get("account_number")),
+            str(employee.get("reason") or "Chưa đủ điều kiện nhận lương"),
+        ]
+        for column, value in enumerate(values, start=1):
+            cell = worksheet.cell(row=row_number, column=column, value=value)
+            cell.font = Font(name="Arial", size=10)
+            cell.border = border
+            cell.alignment = Alignment(
+                horizontal="left" if column in {2, 4} else "center",
+                vertical="center",
+                wrap_text=column == 4,
+            )
+            if column in {1, 3}:
+                cell.number_format = "@"
+        if row_number % 2 == 1:
+            for column in range(1, 5):
+                worksheet.cell(row=row_number, column=column).fill = PatternFill("solid", fgColor="EAF2F8")
+
+    widths = {"A": 18, "B": 34, "C": 24, "D": 38}
+    for column, width in widths.items():
+        worksheet.column_dimensions[column].width = width
+    worksheet.freeze_panes = "A3"
+    worksheet.auto_filter.ref = f"A2:D{max(2, len(employees) + 2)}"
     workbook.save(path)
 
 

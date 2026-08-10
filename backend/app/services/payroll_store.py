@@ -262,6 +262,28 @@ def _load_profile_sources(factory: str = "factory1") -> dict[str, dict[str, dict
         return {}
 
 
+def list_final_copy_employee_codes_before_period(factory: str, month: int, year: int) -> list[str]:
+    """Return employees proven to exist by an earlier saved final copy.
+
+    Final-copy uploads already record their source period for every imported
+    payroll profile field.  Reuse that durable index here so newcomer
+    detection does not require a separately saved attendance-history period.
+    """
+    target_period = (int(year), int(month))
+    employee_codes: set[str] = set()
+    for employee_code, field_sources in _load_profile_sources(factory).items():
+        if not isinstance(field_sources, dict):
+            continue
+        for source in field_sources.values():
+            if not isinstance(source, dict) or _source_kind(source) != "final_copy":
+                continue
+            source_period = _period_key(source)
+            if source_period is not None and source_period < target_period:
+                employee_codes.add(normalize_employee_code(employee_code))
+                break
+    return sorted(employee_codes, key=lambda code: (int(code) if code.isdigit() else float("inf"), code))
+
+
 def _save_profile_sources(sources: dict[str, dict[str, dict[str, Any]]], factory: str = "factory1") -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     partitioned = _partitioned_data(_read_json_dict(PAYROLL_PROFILE_SOURCES_PATH))

@@ -171,10 +171,42 @@ def export_factory2_output2(
             include_saved_data=include_saved_data,
             profile_codes=profile_codes,
             factory=factory,
-            source_payroll_values=_read_legacy_payroll_values(source_path) if carry_source_payroll_data else None,
+            source_payroll_values=(
+                _formula_frame_source_values(_read_legacy_payroll_values(source_path))
+                if carry_source_payroll_data
+                else None
+            ),
         )
     finally:
         temp_source.unlink(missing_ok=True)
+
+
+def _formula_frame_source_values(values_by_code: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Keep legacy inputs, but let the new frame calculate derived values.
+
+    Factory 1 already follows this rule during frame conversion: salary,
+    overtime, bonus and deductions are carried over, while daily/hourly pay,
+    work days, total hours and final salary are formulas in the new workbook.
+    Factory 2 must behave the same way so editing an input recalculates the
+    final monthly salary instead of leaving a stale copied number.
+    """
+
+    input_fields = {
+        "name",
+        "bank_account",
+        "start_work_note",
+        "note",
+        "monthly_salary",
+        "overtime_hours",
+        "bonus",
+        "penalty_rate",
+        "nq_penalty",
+        "advance_or_penalty",
+    }
+    return {
+        code: {key: value for key, value in values.items() if key in input_fields}
+        for code, values in values_by_code.items()
+    }
 
 
 def write_factory2_standard_source(source_path: Path, output_path: Path) -> Path:

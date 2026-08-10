@@ -366,13 +366,23 @@ def _profile_factory2_or_unknown(path: Path, factory: str) -> WorkbookProfile:
 def _select_attendance_sheet(workbook):
     candidates = []
     for worksheet in workbook.worksheets:
-        count = sum(
-            1
-            for row in range(1, worksheet.max_row + 1)
-            if str(worksheet.cell(row, 1).value or "").strip() == "Att. Time"
-        )
-        if count:
-            candidates.append((count, worksheet))
+        blocks = detect_employee_blocks(worksheet)
+        if not blocks:
+            continue
+        codes = [str(block.employee_code).strip() for block in blocks]
+        unique_count = len(set(codes))
+        duplicate_count = len(codes) - unique_count
+        try:
+            summaries = _summary_blocks_by_code(worksheet)
+            has_reformed_layout = _has_reformed_output2_layout(worksheet, summaries)
+        except ValueError:
+            has_reformed_layout = False
+        # A converted historical workbook may intentionally keep the old
+        # month sheet alongside the new frame. Prefer complete unique data,
+        # then the current Output 2 frame instead of blindly taking the first
+        # sheet when both contain the same number of attendance blocks.
+        score = (unique_count, -duplicate_count, int(has_reformed_layout), len(blocks))
+        candidates.append((score, worksheet))
     return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 

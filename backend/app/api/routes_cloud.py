@@ -26,6 +26,7 @@ from app.services.cloud_sync import (
     sync_period_detail,
     test_cloud_connection,
 )
+from app.services.excel_compat import EXCEL_UPLOAD_SUFFIXES, ensure_openpyxl_workbook
 from app.services.factory2_workbook import analyze_factory2_workbook
 from app.services.history_store import get_period_detail, list_periods
 from app.services.workbook_processor import analyze_workbook
@@ -180,8 +181,8 @@ async def save_final_excel_copy(
     user: dict = Depends(require_owner),
 ) -> dict[str, Any]:
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".xlsx", ".xlsm"}:
-        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xlsx hoặc .xlsm")
+    if suffix not in EXCEL_UPLOAD_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xls, .xlsx hoặc .xlsm")
     if month < 1 or month > 12 or year < 2000:
         raise HTTPException(status_code=400, detail="Tháng/năm lưu không hợp lệ")
 
@@ -189,6 +190,10 @@ async def save_final_excel_copy(
     session_dir.mkdir(parents=True, exist_ok=True)
     uploaded_path = session_dir / f"final_copy{suffix}"
     uploaded_path.write_bytes(await file.read())
+    if suffix == ".xls":
+        uploaded_path = ensure_openpyxl_workbook(uploaded_path, session_dir / "final_copy.xlsx")
+        suffix = ".xlsx"
+    stored_filename = Path(file.filename or f"ban_sao_cuoi_cung{suffix}").with_suffix(suffix).name
 
     try:
         # Final copies are the long-lived payroll source.  They must always
@@ -204,7 +209,7 @@ async def save_final_excel_copy(
             )
         return run_final_excel_copy(
             uploaded_path,
-            file.filename or f"ban_sao_cuoi_cung{suffix}",
+            stored_filename,
             month,
             year,
             factory=factory,
@@ -227,14 +232,15 @@ async def detect_final_copy_period(
     user: dict = Depends(require_owner),
 ) -> dict[str, Any]:
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".xlsx", ".xlsm"}:
-        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xlsx hoặc .xlsm")
+    if suffix not in EXCEL_UPLOAD_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xls, .xlsx hoặc .xlsm")
 
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     try:
         with TemporaryDirectory(dir=STORAGE_DIR) as temp_dir:
             uploaded_path = Path(temp_dir) / f"final_copy{suffix}"
             uploaded_path.write_bytes(await file.read())
+            uploaded_path = ensure_openpyxl_workbook(uploaded_path, Path(temp_dir) / "final_copy.xlsx")
             # Always inspect final copies with the strict new-frame guard so
             # the preview and the save endpoint enforce the same contract.
             profile = inspect_workbook_for_role(uploaded_path, "final_copy", factory=factory)

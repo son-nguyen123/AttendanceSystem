@@ -20,6 +20,7 @@ from app.services.payroll_store import (
 )
 from app.services.payroll_workbook import export_payroll_workbook, preview_payroll
 from app.services.session_overrides import merge_session_overrides
+from app.services.local_exports import try_save_local_export_copy
 
 
 router = APIRouter(prefix="/payroll", tags=["payroll"])
@@ -160,6 +161,7 @@ def export_output_2(request: PayrollExportRequest, user: dict = Depends(require_
             profile_codes=profile_codes,
             factory=factory,
         )
+    try_save_local_export_copy(output_path, "output2", "Output2.xlsx", factory=factory)
     return FileResponse(
         output_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

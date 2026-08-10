@@ -106,6 +106,49 @@ class WorkbookGuardTests(unittest.TestCase):
             self.assertEqual(profile.detected_kind, "output2")
             self.assertTrue(profile.has_reformed_output2_layout)
 
+    def test_final_copy_prefers_reformed_sheet_when_old_sheet_is_kept(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "old_and_new_output2.xlsx"
+            _write_output2(path, month=5, reformed=False)
+            workbook = load_workbook(path)
+            old_sheet = workbook.active
+            old_sheet.title = "5"
+            new_sheet = workbook.copy_worksheet(old_sheet)
+            new_sheet.title = "6"
+            new_sheet["C3"] = "2026-06-01 ~ 2026-06-30"
+            for col in range(32, 45):
+                new_sheet.cell(4, col).value = None
+                new_sheet.cell(9, col).value = None
+            headers = {
+                32: "Tổng giờ công",
+                33: "Mức tiền phạt NQ trên giờ công (đ)",
+                34: "Mã",
+                35: "Tên nhân viên / Ghi chú",
+                36: "Mức Lương",
+                37: "Lương 1 Ngày Công",
+                38: "Lương 1 Giờ Công",
+                39: "Số Ngày Đi Làm",
+                40: "Giờ làm thêm",
+                41: "Thưởng",
+                42: "Phạt NQ",
+                43: "Ứng Lương",
+                44: "Lương Tháng 6/2026",
+            }
+            for col, value in headers.items():
+                new_sheet.cell(4, col).value = value
+            new_sheet.cell(9, 32).value = 160
+            new_sheet.cell(9, 34).value = "1006"
+            new_sheet.cell(9, 35).value = "Nhân viên 1006"
+            new_sheet.cell(9, 36).value = 5_200_000
+            workbook.save(path)
+            workbook.close()
+
+            profile = inspect_workbook_for_role(path, "final_copy")
+
+            self.assertEqual(profile.sheet_name, "6")
+            self.assertEqual(profile.period_label, "06/2026")
+            self.assertTrue(profile.has_reformed_output2_layout)
+
 
 def _write_workbook(
     path: Path,

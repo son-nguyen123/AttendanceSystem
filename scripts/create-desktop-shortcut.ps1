@@ -2,13 +2,18 @@ $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $PSScriptRoot
 $AssetsDir = Join-Path $Root "assets"
-$IconPath = Join-Path $AssetsDir "attendance.ico"
+$SourceIconPath = Join-Path $AssetsDir "attendance.ico"
+$IconCacheDir = Join-Path $env:LOCALAPPDATA "AttendanceSystem"
+$IconPath = Join-Path $IconCacheDir "attendance.ico"
 $ShortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "Attendance System.lnk"
-$StartLauncher = Join-Path $Root "scripts\start-hidden.vbs"
+$StartAppScript = Join-Path $Root "scripts\start-app.ps1"
+$LauncherSourcePath = Join-Path $Root "scripts\start-hidden.vbs"
+$LauncherPath = Join-Path $IconCacheDir "start-hidden.vbs"
 
 New-Item -ItemType Directory -Force -Path $AssetsDir | Out-Null
+New-Item -ItemType Directory -Force -Path $IconCacheDir | Out-Null
 
-if (-not (Test-Path $IconPath)) {
+if (-not (Test-Path $SourceIconPath)) {
     Add-Type -AssemblyName System.Drawing
     $bitmap = New-Object System.Drawing.Bitmap 64, 64
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
@@ -24,7 +29,7 @@ if (-not (Test-Path $IconPath)) {
     $graphics.DrawString("AS", $font, $brush, $rect, $format)
 
     $icon = [System.Drawing.Icon]::FromHandle($bitmap.GetHicon())
-    $stream = [System.IO.File]::Create($IconPath)
+    $stream = [System.IO.File]::Create($SourceIconPath)
     $icon.Save($stream)
     $stream.Close()
 
@@ -35,11 +40,18 @@ if (-not (Test-Path $IconPath)) {
     $bitmap.Dispose()
 }
 
+Copy-Item -LiteralPath $SourceIconPath -Destination $IconPath -Force
+Copy-Item -LiteralPath $LauncherSourcePath -Destination $LauncherPath -Force
+
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($ShortcutPath)
 $shortcut.TargetPath = Join-Path $env:SystemRoot "System32\wscript.exe"
-$shortcut.Arguments = "`"$StartLauncher`""
-$shortcut.WorkingDirectory = $Root
+$launchCommand = "& '" + $StartAppScript.Replace("'", "''") + "'"
+$encodedLaunchCommand = [Convert]::ToBase64String(
+    [Text.Encoding]::Unicode.GetBytes($launchCommand)
+)
+$shortcut.Arguments = "`"$LauncherPath`" $encodedLaunchCommand"
+$shortcut.WorkingDirectory = $env:SystemRoot
 $shortcut.IconLocation = $IconPath
 $shortcut.Description = "Open Attendance System"
 $shortcut.Save()

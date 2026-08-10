@@ -5,6 +5,7 @@ import sys
 import unittest
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -66,9 +67,79 @@ class BankPayrollScannerTests(unittest.TestCase):
                 bank_payroll.REGISTRY_PATH = original_registry_path
                 bank_payroll.SESSION_DIR = original_session_dir
 
-            self.assertEqual([item["employee_code"] for item in result["employees"]], ["1006"])
-            self.assertEqual(result["employees"][0]["account_number"], "5601884980")
-            self.assertEqual(result["employees"][0]["salary"], 3_000_000)
+            self.assertEqual([item["employee_code"] for item in result["employees"]], ["1", "1006"])
+            self.assertEqual(result["employees"][0]["name"], "HUYNH VAN CAO")
+            self.assertTrue(result["employees"][0]["salary_editable"])
+            self.assertEqual(result["employees"][1]["account_number"], "5601884980")
+            self.assertEqual(result["employees"][1]["salary"], 3_000_000)
+
+    def test_green_employee_code_is_removed_from_transfer_list(self) -> None:
+        with TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            source = root / "output2.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            headers = ["Ma", "Ten nhan vien", "So Ngay Di Lam", "Luong Thang 7/2026"]
+            for header_row in (1, 4):
+                for column, value in enumerate(headers, start=1):
+                    sheet.cell(header_row, column).value = value
+            sheet.cell(2, 1).value = "1412"
+            sheet.cell(2, 1).font = Font(color="C00000")
+            sheet.cell(2, 2).value = "Nguoi do"
+            sheet.cell(2, 3).value = 10
+            sheet.cell(2, 4).value = 1_000_000
+            sheet.cell(5, 1).value = "1416"
+            sheet.cell(5, 1).font = Font(color="00B050")
+            sheet.cell(5, 2).value = "Nguoi xanh"
+            sheet.cell(5, 3).value = 10
+            sheet.cell(5, 4).value = 1_000_000
+            workbook.save(source)
+            workbook.close()
+
+            original_registry_path = bank_payroll.REGISTRY_PATH
+            original_session_dir = bank_payroll.SESSION_DIR
+            bank_payroll.REGISTRY_PATH = root / "accounts.json"
+            bank_payroll.SESSION_DIR = root / "sessions"
+            bank_payroll.REGISTRY_PATH.write_text("{}", encoding="utf-8")
+            try:
+                result = bank_payroll.scan_official_workbook(source, "factory1")
+            finally:
+                bank_payroll.REGISTRY_PATH = original_registry_path
+                bank_payroll.SESSION_DIR = original_session_dir
+
+            self.assertEqual([item["employee_code"] for item in result["employees"]], ["1", "1412"])
+            self.assertEqual(result["ineligible_count"], 1)
+            self.assertEqual(result["ineligible_employees"][0]["employee_code"], "1416")
+
+    def test_fixed_employee_is_not_added_to_factory2(self) -> None:
+        with TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            source = root / "factory2-output2.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            headers = ["Ma", "Ten nhan vien", "So Ngay Di Lam", "Luong Thang 7/2026"]
+            for column, value in enumerate(headers, start=1):
+                sheet.cell(1, column).value = value
+            sheet.cell(2, 1).value = "2001"
+            sheet.cell(2, 2).value = "Nhan vien xuong 2"
+            sheet.cell(2, 3).value = 10
+            sheet.cell(2, 4).value = 2_000_000
+            workbook.save(source)
+            workbook.close()
+
+            original_registry_path = bank_payroll.REGISTRY_PATH
+            original_session_dir = bank_payroll.SESSION_DIR
+            bank_payroll.REGISTRY_PATH = root / "accounts.json"
+            bank_payroll.SESSION_DIR = root / "sessions"
+            bank_payroll.REGISTRY_PATH.write_text("{}", encoding="utf-8")
+            try:
+                result = bank_payroll.scan_official_workbook(source, "factory2")
+            finally:
+                bank_payroll.REGISTRY_PATH = original_registry_path
+                bank_payroll.SESSION_DIR = original_session_dir
+
+            self.assertEqual([item["employee_code"] for item in result["employees"]], ["2001"])
+            self.assertNotIn("1", [item["employee_code"] for item in result["employees"]])
 
 
 class BankAccountMappingLayoutTests(unittest.TestCase):

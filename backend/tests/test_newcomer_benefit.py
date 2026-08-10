@@ -41,6 +41,11 @@ def _enable_first_time_employee(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         newcomer_benefit,
+        "list_final_copy_employee_codes_before_period",
+        lambda factory, month, year: [],
+    )
+    monkeypatch.setattr(
+        newcomer_benefit,
         "get_latest_period_snapshot",
         lambda factory: {"period": {"month": 6, "year": 2026}, "employee_codes": []},
     )
@@ -101,6 +106,11 @@ def test_employee_known_before_period_never_gets_newcomer_benefit(monkeypatch) -
     )
     monkeypatch.setattr(
         newcomer_benefit,
+        "list_final_copy_employee_codes_before_period",
+        lambda factory, month, year: [],
+    )
+    monkeypatch.setattr(
+        newcomer_benefit,
         "get_latest_period_snapshot",
         lambda factory: {"period": {"month": 6, "year": 2026}, "employee_codes": ["1420"]},
     )
@@ -110,6 +120,40 @@ def test_employee_known_before_period_never_gets_newcomer_benefit(monkeypatch) -
 
     assert overrides == []
     assert analysis["blocks"][0]["results"][0]["work_value"] == 6.5
+
+
+def test_employee_in_earlier_final_copy_never_gets_newcomer_benefit(monkeypatch) -> None:
+    monkeypatch.setattr(
+        newcomer_benefit,
+        "list_known_employee_codes_before_period",
+        lambda factory, month, year: [],
+    )
+    monkeypatch.setattr(
+        newcomer_benefit,
+        "list_final_copy_employee_codes_before_period",
+        lambda factory, month, year: ["1274"],
+    )
+    monkeypatch.setattr(
+        newcomer_benefit,
+        "get_latest_period_snapshot",
+        lambda factory: {"period": None, "employee_codes": []},
+    )
+    analysis = _analysis("1274", 1, ["07:15", "11:32", "12:55", "18:35"])
+
+    overrides = newcomer_benefit.apply_newcomer_first_day_benefits(analysis, "factory1")
+
+    assert overrides == []
+    assert analysis["blocks"][0]["results"][0]["work_value"] == 9.5
+
+
+def test_complete_afternoon_overtime_pair_does_not_receive_four_extra_hours(monkeypatch) -> None:
+    _enable_first_time_employee(monkeypatch)
+    analysis = _analysis("9999", 1, ["07:15", "11:32", "12:55", "18:35"])
+
+    overrides = newcomer_benefit.apply_newcomer_first_day_benefits(analysis, "factory1")
+
+    assert overrides == []
+    assert analysis["blocks"][0]["results"][0]["work_value"] == 9.5
 
 
 def test_reanalyzing_saved_current_period_keeps_newcomer_benefit(monkeypatch) -> None:

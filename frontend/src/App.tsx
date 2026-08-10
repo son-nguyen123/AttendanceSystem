@@ -1126,9 +1126,8 @@ function App() {
   }
 
   async function inspectSelectedFile(selectedFile: File, role: WorkbookRole): Promise<FileInspection | null> {
-    const lowerName = selectedFile.name.toLowerCase()
-    if (!lowerName.endsWith('.xlsx') && !lowerName.endsWith('.xlsm')) {
-      setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xlsx hoặc .xlsm.`)
+    if (!isExcelFile(selectedFile)) {
+      setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xls, .xlsx hoặc .xlsm.`)
       setMessage(null)
       return null
     }
@@ -1174,7 +1173,7 @@ function App() {
     clearTemporaryAnalysis()
     if (!smartScanEnabled) {
       if (!isExcelFile(selectedFile)) {
-        setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xlsx hoặc .xlsm.`)
+        setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xls, .xlsx hoặc .xlsm.`)
         return
       }
       setFile(selectedFile)
@@ -1193,7 +1192,7 @@ function App() {
     if (!selectedFile) return
     if (!smartScanEnabled) {
       if (!isExcelFile(selectedFile)) {
-        setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xlsx hoặc .xlsm.`)
+        setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xls, .xlsx hoặc .xlsm.`)
         return
       }
       if (role === 'mapping_current') setMappingCurrentFile(selectedFile)
@@ -1213,7 +1212,7 @@ function App() {
     if (!selectedFile) return
     if (!smartScanEnabled) {
       if (!isExcelFile(selectedFile)) {
-        setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xlsx hoặc .xlsm.`)
+        setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xls, .xlsx hoặc .xlsm.`)
         return
       }
       setRecalculateFile(selectedFile)
@@ -2281,7 +2280,7 @@ function App() {
       uploadForm.append('factory', factoryMode)
       uploadForm.append('smart_scan', String(smartScanEnabled))
       uploadForm.append('replace_existing', String(replaceExisting))
-      const response = await axios.post<{ path: string; folder: string; profile_sync?: ProfileSyncSummary }>(`${API_BASE}/cloud/final-copy`, uploadForm)
+      const response = await axios.post<{ path: string; local_path?: string; folder: string; profile_sync?: ProfileSyncSummary }>(`${API_BASE}/cloud/final-copy`, uploadForm)
       await loadCloudConfig()
       await loadEmployeeRegistry(selectedCode)
       if (data) await refreshPayroll(data.session_id, true)
@@ -2291,7 +2290,11 @@ function App() {
       const bankWarning = bankConflictCount
         ? ` Cảnh báo: ${bankConflictCount} mã có số tài khoản không khớp/trùng; app không ghi đè. Vào Ngân hàng để kiểm tra và chọn lại.`
         : ''
-      setMessage(`Đã lưu bản sao cuối cùng và cập nhật thông tin nhân viên theo bản mới nhất: ${response.data.path}${bankWarning}`)
+      setMessage(
+        `Đã lưu bản sao cuối cùng trên Drive: ${response.data.path}`
+        + (response.data.local_path ? `; bản cục bộ: ${response.data.local_path}` : '')
+        + `. Đã cập nhật thông tin nhân viên theo bản mới nhất.${bankWarning}`,
+      )
     } catch (err) {
       setError(readAxiosError(err, 'Không lưu được bản sao cuối cùng'))
     } finally {
@@ -2310,9 +2313,8 @@ function App() {
     setError(null)
     setMessage(null)
     if (!selectedFile) return false
-    const lowerName = selectedFile.name.toLowerCase()
-    if (!lowerName.endsWith('.xlsx') && !lowerName.endsWith('.xlsm')) {
-      setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xlsx hoặc .xlsm.`)
+    if (!isExcelFile(selectedFile)) {
+      setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xls, .xlsx hoặc .xlsm.`)
       return false
     }
 
@@ -2918,7 +2920,7 @@ function App() {
     setMessage(null)
     if (selectedFile && !isExcelFile(selectedFile)) {
       setFactory2LegacyFile(null)
-      setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xlsx hoặc .xlsm.`)
+      setError(`File "${selectedFile.name}" không đúng định dạng. Chỉ nhận .xls, .xlsx hoặc .xlsm.`)
       return
     }
     setFactory2LegacyFile(selectedFile)
@@ -2934,7 +2936,7 @@ function App() {
       uploadForm.append('file', factory2LegacyFile)
       uploadForm.append('output_kind', factory2LegacyOutputKind)
       const response = await axios.post(`${API_BASE}/attendance/factory2/convert-legacy`, uploadForm, { responseType: 'blob' })
-      const sourceStem = factory2LegacyFile.name.replace(/\.(xlsx|xlsm)$/i, '')
+      const sourceStem = factory2LegacyFile.name.replace(/\.(xls|xlsx|xlsm)$/i, '')
       const outputLabel = factory2LegacyOutputKind === 'output2' ? 'Output2_KhungMoi' : 'Output1'
       const filename = `Xuong2_${outputLabel}_${sourceStem}.xlsx`
       const convertedFile = new File([response.data], filename, {
@@ -2994,7 +2996,12 @@ function App() {
       setFinalCopyYear(response.headers['x-period-year'] ?? '')
       setFactory1LegacyDialogOpen(false)
       setFactory1LegacyFile(null)
-      setMessage('Đã chuyển bảng cũ Xưởng 1 sang khung mới có công thức, giữ mã/tên, Bắt đầu làm và ghi chú; dữ liệu ngân hàng không được nhập. File đã đặt sẵn vào Bản sao cuối cùng Xưởng 1 để bạn kiểm tra và lưu.')
+      const reconciliationWarnings = Number(response.headers['x-reconciliation-warnings'] ?? 0)
+      setMessage(
+        reconciliationWarnings > 0
+          ? `Đã chuyển bảng cũ và giữ đầy đủ dữ liệu. Có ${reconciliationWarnings} mã mà Lương Tháng cũ không khớp với chính dữ liệu đầu vào cũ; xem sheet “Đối chiếu chuyển khung” trong file trước khi lưu Bản sao cuối cùng.`
+          : 'Đã chuyển bảng cũ Xưởng 1 sang khung mới có công thức, giữ mã/tên, tài khoản ngân hàng, lương, thưởng, ứng/phạt, Bắt đầu làm và toàn bộ ghi chú. File đã đặt sẵn vào Bản sao cuối cùng Xưởng 1 để bạn kiểm tra và lưu.',
+      )
     } catch (err) {
       setError(readAxiosError(err, 'Không chuyển được bảng cũ Xưởng 1'))
     } finally {
@@ -3817,12 +3824,11 @@ function App() {
                 placeholder="Bảng cũ Xưởng 1"
                 busy={factory1LegacyLoading ? 'Đang tạo khung mới...' : null}
                 disabled={factory1LegacyLoading}
-                allowLegacyXls
                 onFile={selectFactory1LegacyFile}
               />
             </div>
             <div className="factory2-converter-note">
-              Khung mới giữ mã, tên, mức lương, giờ làm thêm, thưởng, Bắt đầu làm và ghi chú của bảng cũ; ngân hàng không được nhập. Nếu bảng cũ có cột “Ứng Lương + Phạt”, toàn bộ số tiền sẽ được nhập vào cột “Ứng Lương” của bảng mới. Công thức lương không đổi, để kết quả tháng cũ không bị sai số; file được đặt sẵn vào Bản sao cuối cùng Xưởng 1 để bạn kiểm tra và lưu.
+              Khung mới giữ mã, tên, tài khoản ngân hàng, mức lương, giờ làm thêm, thưởng, Bắt đầu làm và toàn bộ ghi chú của bảng cũ. Nếu bảng cũ có cột “Ứng Lương + Phạt”, toàn bộ số tiền sẽ được nhập vào cột “Ứng Lương” của bảng mới. Công thức lương không đổi, để kết quả tháng cũ không bị sai số; file được đặt sẵn vào Bản sao cuối cùng Xưởng 1 để bạn kiểm tra và lưu.
             </div>
             <div className="employee-card-archive-actions">
               <button type="button" className="secondary-button" disabled={factory1LegacyLoading} onClick={() => setFactory1LegacyDialogOpen(false)}>
@@ -4678,6 +4684,9 @@ type BankEmployee = {
   work_days?: number
   conflict_accounts?: string[]
   conflict_codes?: string[]
+  salary_eligible?: boolean
+  is_fixed?: boolean
+  salary_editable?: boolean
 }
 
 type BankAccountDirectoryRow = {
@@ -4707,6 +4716,21 @@ type BankAccountOverview = {
   total: number
   with_account: number
   without_account: number
+  duplicate_accounts?: Array<{ account_number: string; employee_codes: string[] }>
+}
+
+function bankAccountConflictCodes(
+  employeeCode: string,
+  accountNumber: string,
+  rows: Array<{ employee_code: string; account_number: string }>,
+  warehouseRows: Array<{ employee_code: string; account_number: string }> = [],
+) {
+  const account = accountNumber.replace(/\D/g, '')
+  if (!account) return []
+  return [...new Set([...rows, ...warehouseRows]
+    .filter((item) => item.employee_code !== employeeCode && item.account_number.replace(/\D/g, '') === account)
+    .map((item) => item.employee_code))]
+    .sort((left, right) => Number(left) - Number(right) || left.localeCompare(right))
 }
 
 type BankScan = {
@@ -4715,6 +4739,8 @@ type BankScan = {
   year: number | null
   source_filename: string
   employees: BankEmployee[]
+  ineligible_employees?: BankEmployee[]
+  ineligible_count?: number
 }
 
 function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfirm: (options: ConfirmationOptions) => Promise<boolean> }) {
@@ -4727,6 +4753,8 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [exportChoiceOpen, setExportChoiceOpen] = useState(false)
+  const [missingAccountChoiceOpen, setMissingAccountChoiceOpen] = useState(false)
+  const [missingAccountMode, setMissingAccountMode] = useState<'require_all' | 'with_account_only' | 'leave_blank'>('require_all')
   const [salaryFile, setSalaryFile] = useState<File | null>(null)
   const [salaryMonth, setSalaryMonth] = useState(String(new Date().getMonth() + 1))
   const [salaryYear, setSalaryYear] = useState(String(new Date().getFullYear()))
@@ -4740,7 +4768,8 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
   const [savedAccountNumbers, setSavedAccountNumbers] = useState<Record<string, string>>({})
   const [bankFileDragging, setBankFileDragging] = useState(false)
   const activeCodes = scan ? new Set(rows.map((row) => row.employee_code)) : null
-  const missing = rows.filter((row) => !row.account_number.trim()).length
+  const missingInfoRows = rows.filter((row) => !row.name.trim() || !row.account_number.trim())
+  const missing = missingInfoRows.length
   const conflictCount = rows.filter((row) => row.conflict_accounts?.length || row.conflict_codes?.length).length
   const total = rows.reduce((sum, row) => sum + Number(row.salary || 0), 0)
   const visibleRows = rows.filter((row) => {
@@ -4763,8 +4792,8 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
   }
 
   useEffect(() => {
-    if (bankTab !== 'accounts') return
     let cancelled = false
+    if (bankTab === 'accounts') setAccountLoading(true)
     axios.get<BankAccountOverview>(`${API_BASE}/bank/accounts/overview`, { params: { factory } })
       .then((response) => {
         if (!cancelled) setAccountOverview(response.data)
@@ -4780,6 +4809,24 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
     }
   }, [bankTab, factory])
 
+  function updateTransferAccount(employeeCode: string, rawValue: string) {
+    const accountNumber = rawValue.replace(/\D/g, '')
+    setRows((current) => {
+      const updated = current.map((item) => item.employee_code === employeeCode
+        ? { ...item, account_number: accountNumber, conflict_accounts: [] }
+        : item)
+      return updated.map((item) => ({
+        ...item,
+        conflict_codes: bankAccountConflictCodes(
+          item.employee_code,
+          item.account_number,
+          updated,
+          accountOverview?.accounts ?? [],
+        ),
+      }))
+    })
+  }
+
   async function scanFile() {
     if (!file) return
     setBusy('scan')
@@ -4791,7 +4838,10 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
     try {
       const response = await axios.post<BankScan>(`${API_BASE}/bank/scan`, form)
       applyBankScan(response.data)
-      setNotice(`Đã nhận diện ${response.data.employees.length} nhân viên từ bảng chính thức.`)
+      setNotice(
+        `Đã nhận diện ${response.data.employees.length} người trong danh sách nhận lương.`
+        + (response.data.ineligible_count ? ` Có ${response.data.ineligible_count} người chưa đủ điều kiện được tách riêng.` : ''),
+      )
     } catch (err) {
       setError(readAxiosError(err, 'Không đọc được bảng lương chính thức'))
     } finally {
@@ -4844,8 +4894,8 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
   async function selectSalaryFile(selected: File | null) {
     setSalaryFile(selected)
     if (!selected) return
-    if (!/\.(xlsx|xlsm)$/i.test(selected.name)) {
-      setError('Chỉ nhận file Excel .xlsx hoặc .xlsm.')
+    if (!/\.(xls|xlsx|xlsm)$/i.test(selected.name)) {
+      setError('Chỉ nhận file Excel .xls, .xlsx hoặc .xlsm.')
       setSalaryFile(null)
       return
     }
@@ -4992,16 +5042,20 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
         await axios.post(`${API_BASE}/bank/backup-drive?factory=${factory}`)
       }
       if (destination === 'local') {
-        const saved = await axios.post<{ path: string; filename: string }>(
+        const saved = await axios.post<{ path: string; filename: string; review_path?: string | null; review_count?: number }>(
           `${API_BASE}/bank/export-local`,
-          { scan_id: scan.scan_id, accounts: rows },
+          { scan_id: scan.scan_id, accounts: rows, missing_account_mode: missingAccountMode },
         )
-        setNotice(`Đã lưu file bảng lương cục bộ: ${saved.data.path}`)
+        setNotice(
+          saved.data.review_path
+            ? `Đã lưu bảng lương và danh sách cần kiểm tra: ${saved.data.path}; ${saved.data.review_path}`
+            : `Đã lưu file bảng lương cục bộ: ${saved.data.path}`,
+        )
         return
       }
       const response = await axios.post(
         `${API_BASE}/bank/export`,
-        { scan_id: scan.scan_id, accounts: rows },
+        { scan_id: scan.scan_id, accounts: rows, missing_account_mode: missingAccountMode },
         { responseType: 'blob' },
       )
       const month = String(scan.month || 0).padStart(2, '0')
@@ -5016,6 +5070,27 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
 
   return (
     <section className="bank-workspace">
+      {missingAccountChoiceOpen && (
+        <div className="export-choice-backdrop" role="presentation" onMouseDown={() => setMissingAccountChoiceOpen(false)}>
+          <section className="export-choice-dialog bank-export-dialog" role="dialog" aria-modal="true" aria-labelledby="missing-bank-title" onMouseDown={(event) => event.stopPropagation()}>
+            <p className="export-choice-kicker">Thiếu thông tin nhận lương</p>
+            <h2 id="missing-bank-title">Có {missing} mã thiếu họ tên hoặc số tài khoản</h2>
+            <p>Bạn nên bổ sung thông tin cho các mã này. Nếu cần xuất ngay, hãy chọn một cách xử lý bên dưới.</p>
+            <p><strong>Mã còn thiếu:</strong> {missingInfoRows.map((row) => row.employee_code).slice(0, 20).join(', ')}{missing > 20 ? '…' : ''}</p>
+            <div className="export-choice-options">
+              <button type="button" className="export-choice-card bank-save-choice" onClick={() => { setMissingAccountMode('with_account_only'); setMissingAccountChoiceOpen(false); setExportChoiceOpen(true) }}>
+                <strong>Không xuất người thiếu thông tin</strong>
+                <span>Đưa họ sang danh sách cần kiểm tra, không đưa vào file ngân hàng.</span>
+              </button>
+              <button type="button" className="export-choice-card formula-only" onClick={() => { setMissingAccountMode('leave_blank'); setMissingAccountChoiceOpen(false); setExportChoiceOpen(true) }}>
+                <strong>Vẫn xuất và để trống</strong>
+                <span>Thiếu một mục vẫn xuất; thiếu cả họ tên và tài khoản sẽ chuyển sang danh sách cần kiểm tra.</span>
+              </button>
+            </div>
+            <button type="button" className="secondary-button export-choice-cancel" onClick={() => setMissingAccountChoiceOpen(false)}>Bổ sung sau</button>
+          </section>
+        </div>
+      )}
       {exportChoiceOpen && (
         <div className="export-choice-backdrop" role="presentation" onMouseDown={() => setExportChoiceOpen(false)}>
           <section
@@ -5130,7 +5205,7 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
             setFile(event.dataTransfer.files?.[0] || null)
           }}
         >
-          <input type="file" accept=".xlsx,.xlsm" onChange={(event) => setFile(event.target.files?.[0] || null)} />
+          <input type="file" accept=".xls,.xlsx,.xlsm" onChange={(event) => setFile(event.target.files?.[0] || null)} />
           <span className="bank-file-mark">XLSX</span>
           <span><strong>{file?.name || 'Chọn bảng chính thức Output 2'}</strong><small>File có họ tên, mã nhân viên và tiền lương cuối</small></span>
         </label>
@@ -5156,7 +5231,7 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
             void selectSalaryFile(event.dataTransfer.files?.[0] || null)
           }}
         >
-          <input type="file" accept=".xlsx,.xlsm" onChange={(event) => void selectSalaryFile(event.target.files?.[0] || null)} />
+          <input type="file" accept=".xls,.xlsx,.xlsm" onChange={(event) => void selectSalaryFile(event.target.files?.[0] || null)} />
           <span>XLSX</span>
           <strong>{salaryFile?.name || 'Chọn hoặc kéo thả file Excel lương cũ'}</strong>
         </label>
@@ -5209,7 +5284,7 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
                   <tr key={row.employee_code} className={row.conflict_accounts?.length || row.conflict_codes?.length ? 'bank-conflict-row' : ''}>
                     <td>{index + 1}</td><td><strong>{row.employee_code}</strong></td><td>{row.name}</td>
                     <td>
-                      <input inputMode="numeric" value={row.account_number} placeholder="Nhập số tài khoản" onChange={(event) => setRows((current) => current.map((item) => item.employee_code === row.employee_code ? { ...item, account_number: event.target.value.replace(/\D/g, ''), conflict_accounts: [], conflict_codes: [] } : item.conflict_codes?.length ? { ...item, conflict_codes: [] } : item))} />
+                      <input inputMode="numeric" disabled={row.is_fixed} value={row.account_number} placeholder="Nhập số tài khoản" onChange={(event) => updateTransferAccount(row.employee_code, event.target.value)} />
                       {Boolean(row.conflict_accounts?.length) && (
                         <div className="bank-conflict-note">
                           <span>Mã này đang có {row.conflict_accounts?.length} số tài khoản. Xóa mã sai:</span>
@@ -5241,7 +5316,19 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
                         </div>
                       )}
                     </td>
-                    <td className="bank-money">{Number(row.salary).toLocaleString('vi-VN')} đ</td>
+                    <td className="bank-money">
+                      {row.salary_editable ? (
+                        <input
+                          className="bank-salary-input"
+                          type="number"
+                          min="0"
+                          step="1000"
+                          value={row.salary}
+                          aria-label={`Tiền lương nhập thủ công mã ${row.employee_code}`}
+                          onChange={(event) => setRows((current) => current.map((item) => item.employee_code === row.employee_code ? { ...item, salary: Math.max(0, Number(event.target.value || 0)) } : item))}
+                        />
+                      ) : `${Number(row.salary).toLocaleString('vi-VN')} đ`}
+                    </td>
                     <td>
                       <span className={`bank-row-status${row.conflict_accounts?.length || row.conflict_codes?.length ? ' conflict' : isUnsavedAccount(row) ? ' draft' : row.account_number ? ' complete' : ''}`}>
                         {row.conflict_accounts?.length || row.conflict_codes?.length
@@ -5260,10 +5347,12 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
           </div>
         )}
         <div className="bank-table-footer">
-          <span>{conflictCount ? `Có ${conflictCount} mã bị trùng hoặc có nhiều số tài khoản; hãy kiểm tra lại trước khi xuất.` : missing ? `Còn ${missing} nhân viên cần nhập số tài khoản trước khi xuất.` : rows.length ? 'Danh sách đã đủ thông tin để xuất.' : 'Dữ liệu được lưu trên máy; Drive dùng để sao lưu và khôi phục.'}</span>
+          <span>{conflictCount ? `Có ${conflictCount} mã bị trùng hoặc có nhiều số tài khoản; hãy kiểm tra lại trước khi xuất.` : missing ? `Còn ${missing} nhân viên thiếu thông tin; bạn có thể bổ sung hoặc chọn cách xuất phù hợp.` : scan?.ineligible_count ? `Có ${scan.ineligible_count} người chưa đủ điều kiện; app sẽ xuất một danh sách riêng.` : rows.length ? 'Danh sách đã đủ thông tin để xuất.' : 'Dữ liệu được lưu trên máy; Drive dùng để sao lưu và khôi phục.'}</span>
           <div>
             <button type="button" className="secondary-button" disabled={!rows.length || Boolean(busy) || conflictCount > 0} onClick={save}>{busy === 'save' ? 'Đang lưu...' : 'Lưu số tài khoản'}</button>
-            <button type="button" disabled={!scan || Boolean(busy) || missing > 0 || conflictCount > 0} onClick={() => setExportChoiceOpen(true)}>{busy === 'export' ? 'Đang tạo Excel...' : 'Xuất Excel ngân hàng'}</button>
+            <button type="button" disabled={!scan || Boolean(busy) || conflictCount > 0} onClick={() => { if (missing) setMissingAccountChoiceOpen(true); else { setMissingAccountMode('require_all'); setExportChoiceOpen(true) } }}>
+              {busy === 'export' ? 'Đang tạo Excel...' : scan?.ineligible_count ? <>Xuất bảng lương<br />&amp; DS chưa đủ điều kiện</> : 'Xuất Excel ngân hàng'}
+            </button>
           </div>
         </div>
       </div>
@@ -5300,6 +5389,10 @@ function BankAccountDirectory({
 }) {
   const [draftAccounts, setDraftAccounts] = useState<Record<string, string>>({})
   const [savingCode, setSavingCode] = useState('')
+  const draftRows = (overview?.accounts ?? []).map((row) => ({
+    employee_code: row.employee_code,
+    account_number: draftAccounts[row.employee_code] ?? row.account_number,
+  }))
   const keyword = search.trim().toLowerCase()
   const filteredRows = (overview?.accounts ?? []).filter((row) =>
     !keyword || row.employee_code.toLowerCase().includes(keyword) || row.name.toLowerCase().includes(keyword),
@@ -5314,9 +5407,11 @@ function BankAccountDirectory({
   })
 
   async function saveRow(row: BankAccountDirectoryRow) {
+    const accountNumber = draftAccounts[row.employee_code] ?? row.account_number
+    if (bankAccountConflictCodes(row.employee_code, accountNumber, draftRows).length) return
     setSavingCode(row.employee_code)
     try {
-      await onSaveAccount(row, draftAccounts[row.employee_code] ?? '')
+      await onSaveAccount(row, accountNumber)
     } finally {
       setSavingCode('')
     }
@@ -5354,9 +5449,13 @@ function BankAccountDirectory({
             <thead><tr><th>STT</th><th>Mã nhân viên</th><th>Họ và tên</th><th>Số tài khoản</th><th>Trạng thái</th></tr></thead>
             <tbody>
               {rows.map((row, index) => (
+                (() => {
+                  const draftAccount = draftAccounts[row.employee_code] ?? row.account_number
+                  const liveConflictCodes = bankAccountConflictCodes(row.employee_code, draftAccount, draftRows)
+                  return (
                 <tr
                   key={row.employee_code}
-                  className={`${row.conflict_codes?.length ? 'bank-conflict-row ' : ''}${activeCodes
+                  className={`${liveConflictCodes.length || row.conflict_codes?.length ? 'bank-conflict-row ' : ''}${activeCodes
                     ? activeCodes.has(row.employee_code)
                       ? row.account_number ? 'bank-directory-active-complete' : 'bank-directory-active-missing'
                       : 'bank-directory-inactive'
@@ -5368,7 +5467,7 @@ function BankAccountDirectory({
                   <td className="bank-directory-account bank-directory-edit-cell">
                     <input
                       inputMode="numeric"
-                      value={draftAccounts[row.employee_code] ?? row.account_number}
+                      value={draftAccount}
                       placeholder="Chưa nhập"
                       onChange={(event) => setDraftAccounts((current) => ({ ...current, [row.employee_code]: event.target.value.replace(/\D/g, '') }))}
                       aria-label={`Số tài khoản mã ${row.employee_code}`}
@@ -5376,20 +5475,22 @@ function BankAccountDirectory({
                     <button
                       type="button"
                       className="bank-directory-save"
-                      disabled={savingCode === row.employee_code || (draftAccounts[row.employee_code] ?? row.account_number) === row.account_number}
+                      disabled={savingCode === row.employee_code || draftAccount === row.account_number || liveConflictCodes.length > 0}
                       onClick={() => void saveRow(row)}
                     >
                       {savingCode === row.employee_code ? 'Đang lưu' : 'Lưu'}
                     </button>
                   </td>
                   <td>
-                    <span className={`bank-row-status${row.conflict_codes?.length ? ' conflict' : activeCodes && !activeCodes.has(row.employee_code) ? ' inactive' : activeCodes && row.account_number ? ' complete' : ''}`}>
-                      {row.conflict_codes?.length
-                        ? `Trùng số với mã ${row.conflict_codes.join(', ')}`
+                    <span className={`bank-row-status${liveConflictCodes.length || row.conflict_codes?.length ? ' conflict' : activeCodes && !activeCodes.has(row.employee_code) ? ' inactive' : activeCodes && draftAccount ? ' complete' : ''}`}>
+                      {liveConflictCodes.length || row.conflict_codes?.length
+                        ? `Trùng số với mã ${(liveConflictCodes.length ? liveConflictCodes : row.conflict_codes ?? []).join(', ')}`
                         : !activeCodes ? 'Trong kho' : !activeCodes.has(row.employee_code) ? 'Không làm tháng này' : row.account_number ? 'Có thể nhận lương' : 'Cần bổ sung'}
                     </span>
                   </td>
                 </tr>
+                  )
+                })()
               ))}
             </tbody>
           </table>
@@ -8278,7 +8379,6 @@ function ExcelDropZone({
   placeholder,
   busy,
   disabled = false,
-  allowLegacyXls = false,
   onFile,
 }: {
   id: string
@@ -8287,7 +8387,6 @@ function ExcelDropZone({
   placeholder: string
   busy?: string | null
   disabled?: boolean
-  allowLegacyXls?: boolean
   onFile: (file: File | null) => void | Promise<void>
 }) {
   const [dragging, setDragging] = useState(false)
@@ -8321,7 +8420,7 @@ function ExcelDropZone({
       <input
         id={id}
         type="file"
-        accept={allowLegacyXls ? '.xls,.xlsx,.xlsm' : '.xlsx,.xlsm'}
+        accept=".xls,.xlsx,.xlsm"
         disabled={disabled}
         onChange={(event) => {
           const selectedFile = event.currentTarget.files?.[0] ?? null
@@ -9187,30 +9286,16 @@ function readableSourceExportFilename(
 }
 
 function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  link.style.display = 'none'
-  document.body.appendChild(link)
-  link.click()
-  // Keep the object URL alive long enough for Chromium/Edge to start the
-  // download. Revoking it immediately can leave the success toast visible
-  // while no file is actually written to Downloads.
-  window.setTimeout(() => {
-    link.remove()
-    URL.revokeObjectURL(url)
-  }, 1500)
+  // The backend has already saved the export into the configured local
+  // folder. Do not trigger a second browser copy in Downloads.
+  void blob
+  void filename
 }
 
 function downloadFromUrl(url: string, filename: string) {
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  link.style.display = 'none'
-  document.body.appendChild(link)
-  link.click()
-  window.setTimeout(() => link.remove(), 1500)
+  // prepare-employee-cards saves the ZIP locally before returning.
+  void url
+  void filename
 }
 
 function withDownloadToken(url: string, token: string) {
@@ -9269,7 +9354,7 @@ function readSmartSettings() {
 
 function isExcelFile(file: File) {
   const lowerName = file.name.toLowerCase()
-  return lowerName.endsWith('.xlsx') || lowerName.endsWith('.xlsm')
+  return lowerName.endsWith('.xls') || lowerName.endsWith('.xlsx') || lowerName.endsWith('.xlsm')
 }
 
 function isLegacyExcelFile(file: File) {

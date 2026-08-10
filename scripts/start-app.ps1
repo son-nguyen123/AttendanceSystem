@@ -69,7 +69,9 @@ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 if (Test-Path $SplashPath) {
     try {
-        $splashProcess = Start-Process -FilePath "mshta.exe" -ArgumentList @($SplashPath) -PassThru
+        # mshta receives a single file argument; keep the quoted path intact
+        # because this project lives under a directory containing spaces.
+        $splashProcess = Start-Process -FilePath "mshta.exe" -ArgumentList @("`"$SplashPath`"") -PassThru
     } catch {
         # The application can still start on Windows editions without HTA.
         $splashProcess = $null
@@ -95,9 +97,14 @@ if ((Test-PortListening -Port 8000) -or (Test-PortListening -Port 5173)) {
 }
 
 Start-Backend
+$frontendScript = Join-Path $PSScriptRoot "run-frontend.ps1"
+$frontendCommand = "& '" + $frontendScript.Replace("'", "''") + "'"
+$encodedFrontendCommand = [Convert]::ToBase64String(
+    [Text.Encoding]::Unicode.GetBytes($frontendCommand)
+)
 Start-Process `
     -FilePath "powershell.exe" `
-    -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "run-frontend.ps1")) `
+    -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $encodedFrontendCommand) `
     -WorkingDirectory $Root `
     -RedirectStandardOutput $FrontendOut `
     -RedirectStandardError $FrontendErr `

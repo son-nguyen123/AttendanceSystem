@@ -26,7 +26,7 @@ STORAGE_DIR = Path(__file__).resolve().parents[2] / "storage"
 CONFIG_PATH = STORAGE_DIR / "cloud_config.json"
 REQUEST_TIMEOUT_SECONDS = 20
 SUBMISSION_BUCKET = "attendance-submissions"
-LOCAL_EXPORT_DIR = STORAGE_DIR / "local_exports"
+LOCAL_EXPORT_DIR = Path(r"C:\data xuất lương")
 
 
 def get_cloud_config(include_secret: bool = False) -> dict[str, Any]:
@@ -84,6 +84,9 @@ def save_cloud_config(data: dict[str, Any]) -> dict[str, Any]:
         "last_error": None,
     }
     _write_config(next_config)
+    from app.services.local_exports import ensure_local_export_folders
+
+    ensure_local_export_folders(next_config["local_export_dir"])
     return get_cloud_config()
 
 
@@ -349,6 +352,30 @@ def run_drive_backup(reason: str = "manual") -> dict[str, Any]:
 def run_period_excel_backup(detail: dict[str, Any], reason: str = "save_history") -> dict[str, Any]:
     config = _read_config()
     result = create_period_excel_backup(config, detail, reason=reason)
+    from app.services.local_exports import save_local_export_copy
+
+    period = detail.get("period") or {}
+    factory = "factory2" if str(period.get("factory") or "").strip() == "factory2" else "factory1"
+    month = int(period.get("month") or 0)
+    year = int(period.get("year") or 0)
+    prefix = f"Xuong{2 if factory == 'factory2' else 1}_{year}-{month:02d}"
+    local_paths: list[str] = []
+    for source_key, category, label in (
+        ("source_path", "history", "FileGoc"),
+        ("output1_path", "output1", "Output1"),
+        ("output2_path", "output2", "Output2"),
+    ):
+        source = Path(str(period.get(source_key) or ""))
+        if not source.is_file():
+            continue
+        local_target = save_local_export_copy(
+            source,
+            category,
+            f"{prefix}_{label}{source.suffix}",
+            factory=factory,
+        )
+        local_paths.append(str(local_target))
+    result["local_paths"] = local_paths
     _update_config(last_backup_at=_now(), last_backup_path=result["path"], last_backup_error=None)
     return result
 
@@ -371,6 +398,15 @@ def run_analysis_excel_copy(
         factory=factory,
         replace_existing=replace_existing,
     )
+    from app.services.local_exports import save_local_export_copy
+
+    local_target = save_local_export_copy(
+        Path(result["path"]),
+        "history",
+        Path(result["path"]).name,
+        factory=factory,
+    )
+    result["local_path"] = str(local_target)
     _update_config(last_backup_at=_now(), last_backup_path=result["path"], last_backup_error=None)
     return result
 
@@ -403,6 +439,15 @@ def run_final_excel_copy(
         profile_sync_mode=profile_sync_mode,
         replace_existing=replace_existing,
     )
+    from app.services.local_exports import save_local_export_copy
+
+    local_target = save_local_export_copy(
+        Path(result["path"]),
+        "history",
+        Path(result["path"]).name,
+        factory=factory,
+    )
+    result["local_path"] = str(local_target)
     _update_config(last_backup_at=_now(), last_backup_path=result["path"], last_backup_error=None)
     return result
 

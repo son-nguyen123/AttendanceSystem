@@ -61,13 +61,14 @@ def export_employee_cards_zip(
                 review_overrides=overrides,
                 factory=factory,
             )
-        return export_employee_screenshots_from_workbook(workbook_path, output_path, kind)
+        return export_employee_screenshots_from_workbook(workbook_path, output_path, kind, factory=factory)
 
 
 def export_employee_screenshots_from_workbook(
     workbook_path: Path,
     output_path: Path,
     kind: str,
+    factory: str = "factory1",
 ) -> Path:
     """Capture each employee block exactly as Excel renders it and zip the PNGs."""
     if kind not in {"output1", "output2"}:
@@ -106,6 +107,7 @@ def export_employee_screenshots_from_workbook(
         workbook.close()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_folder = "Xuong2" if factory == "factory2" else "Xuong1"
     with TemporaryDirectory(prefix="attendance-excel-png-") as image_dir:
         image_path = Path(image_dir)
         jobs_path = image_path / "jobs.json"
@@ -116,7 +118,9 @@ def export_employee_screenshots_from_workbook(
                 png_path = image_path / job["filename"]
                 if not png_path.exists() or png_path.stat().st_size <= 0:
                     raise ValueError(f"Excel chưa tạo được ảnh {job['filename']}")
-                archive.write(png_path, arcname=job["filename"])
+                # Keep each factory under its own top-level directory so users
+                # can extract both ZIP files into the same place safely.
+                archive.write(png_path, arcname=f"{archive_folder}/{job['filename']}")
     return output_path
 
 

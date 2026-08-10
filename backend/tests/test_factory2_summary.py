@@ -122,7 +122,7 @@ class Factory2SummaryTests(unittest.TestCase):
 
             converted = load_workbook(output, data_only=False)
             result = converted.active
-            self.assertEqual(result["AF9"].value, 215.7)
+            self.assertEqual(result["AF9"].value, "=SUM(A9:AE9)")
             self.assertEqual(result["AH9"].value, "2")
             self.assertEqual(result["AI9"].value, "NGUYEN A")
             self.assertEqual(result["AJ9"].value, 3_120_000)
@@ -132,11 +132,15 @@ class Factory2SummaryTests(unittest.TestCase):
             self.assertEqual(result["AN9"].value, 7.7)
             self.assertEqual(result["AO9"].value, 500_000)
             self.assertEqual(result["AQ9"].value, 300_000)
-            self.assertEqual(result["AR9"].value, 3_294_000)
+            self.assertEqual(
+                result["AR9"].value,
+                '=IF(AK9>0,AK9,IF(AJ9>0,AJ9/26,0))*AM9+(AN9*AL9*1.5)'
+                '-IF(ISNUMBER(AQ9),AQ9,0)-AP9+IF(ISNUMBER(AO9),AO9,0)',
+            )
             self.assertTrue(str(result["AK9"].value).startswith("="))
             self.assertTrue(str(result["AL9"].value).startswith("="))
             self.assertTrue(str(result["AM9"].value).startswith("="))
-            self.assertFalse(str(result["AR9"].value).startswith("="))
+            self.assertTrue(str(result["AR9"].value).startswith("="))
             converted.close()
 
     def test_output2_conversion_carries_legacy_start_and_free_form_note(self) -> None:

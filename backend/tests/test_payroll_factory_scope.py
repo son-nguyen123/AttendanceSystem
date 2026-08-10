@@ -50,6 +50,34 @@ class PayrollFactoryScopeTests(unittest.TestCase):
         saved = json.loads(self.data_path.read_text(encoding="utf-8"))
         self.assertEqual(set(saved), {"factory1", "factory2"})
 
+    def test_final_copy_codes_are_known_only_after_their_source_period(self) -> None:
+        self.sources_path.write_text(
+            json.dumps(
+                {
+                    "factory1": {
+                        "1274": {
+                            "name": {"kind": "final_copy", "month": 6, "year": 2026},
+                        },
+                        "1297": {
+                            "name": {"kind": "manual", "month": 6, "year": 2026},
+                            "bonus": {"kind": "final_copy", "month": 7, "year": 2026},
+                        },
+                    },
+                    "factory2": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            payroll_store.list_final_copy_employee_codes_before_period("factory1", 7, 2026),
+            ["1274"],
+        )
+        self.assertEqual(
+            payroll_store.list_final_copy_employee_codes_before_period("factory1", 8, 2026),
+            ["1274", "1297"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

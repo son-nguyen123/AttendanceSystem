@@ -34,6 +34,12 @@ setup-storage.bat
 start.bat
 ```
 
+Để chọn một ổ/thư mục cố định và tạo sẵn các thư mục Output 1, Output 2, ảnh chấm công, ngân hàng, chuyển khung, gán dữ liệu và tính lại, chạy:
+
+```bat
+setup-output-folders.bat
+```
+
 Các script sẽ tải môi trường Python và Node cần thiết, cài thư viện, hướng dẫn
 chọn thư mục Google Drive và khởi động ứng dụng.
 
@@ -97,6 +103,19 @@ Supabase vẫn được hỗ trợ nhưng tắt mặc định. Khi chỉ sử d�
 mới không cần URL hoặc khóa Supabase và không phát sinh lỗi kết nối Supabase.
 Lược đồ dành cho tùy chọn này nằm tại
 [`docs/supabase_schema.sql`](docs/supabase_schema.sql).
+
+Các file xuất cục bộ được tách hoàn toàn theo xưởng tại thư mục đã cấu hình:
+
+```text
+data xuất lương/
+├── Xuong1/              01_Output1 ... 08_BanChot_LichSu
+└── Xuong2/              01_Output1 ... 08_BanChot_LichSu
+```
+
+Khi lưu **Bản đang phân tích**, **Bản sao cuối cùng** hoặc sao lưu Excel theo
+kỳ, ứng dụng lưu cả bản Google Drive và bản cục bộ trong cây thư mục đúng xưởng.
+Nếu nâng cấp từ cấu trúc thư mục chung cũ, app tự chuyển file có thể xác định
+được xưởng và không ghi đè file đã tồn tại.
 
 ## Dữ liệu không được đưa lên GitHub
 

@@ -40,6 +40,7 @@ from app.services.history_store import (
     update_employee_monthly_record,
 )
 from app.services.session_overrides import merge_session_overrides
+from app.services.local_exports import try_save_local_export_copy
 
 
 router = APIRouter(prefix="/history", tags=["history"])
@@ -292,6 +293,7 @@ def search_history(
 def download_history_file(period_id: str, kind: str, user: dict = Depends(require_owner)) -> FileResponse:
     try:
         path = get_period_file(period_id, kind)
+        detail = get_period_detail(period_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Không tìm thấy kỳ chấm công") from exc
     except (ValueError, FileNotFoundError) as exc:
@@ -302,10 +304,19 @@ def download_history_file(period_id: str, kind: str, user: dict = Depends(requir
         "output1": "Output1.xlsx",
         "output2": "Output2.xlsx",
     }
+    filename = filename_by_kind.get(kind, path.name)
+    category = kind if kind in {"output1", "output2"} else "history"
+    period = detail.get("period") or {}
+    try_save_local_export_copy(
+        path,
+        category,
+        filename,
+        factory=str(period.get("factory") or "factory1"),
+    )
     return FileResponse(
         path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename=filename_by_kind.get(kind, path.name),
+        filename=filename,
     )
 
 
@@ -321,22 +332,35 @@ def download_history_employee_images(period_id: str, kind: str, user: dict = Dep
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    period = detail.get("period") or {}
+    factory = str(period.get("factory") or "factory1")
     output_dir = STORAGE_DIR / "exports" / "history_employee_images"
-    output_path = output_dir / f"{period_id}_{kind}.zip"
+    output_path = output_dir / f"{period_id}_{factory}_{kind}.zip"
     try:
         if not _is_fresh_export(output_path, source_path):
-            export_employee_screenshots_from_workbook(source_path, output_path, kind)
+            export_employee_screenshots_from_workbook(
+                source_path,
+                output_path,
+                kind,
+                factory=factory,
+            )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Không xuất được ảnh bảng công từ lịch sử: {exc}") from exc
 
-    period = detail.get("period") or {}
     factory_label = "Xuong2" if period.get("factory") == "factory2" else "Xuong1"
     month = int(period.get("month") or 0)
     year = int(period.get("year") or 0)
+    filename = f"{factory_label}_{year}-{month:02d}_AnhBangCongNhanVien_{kind}.zip"
+    try_save_local_export_copy(
+        output_path,
+        "employee_cards",
+        filename,
+        factory=factory,
+    )
     return FileResponse(
         output_path,
         media_type="application/zip",
-        filename=f"{factory_label}_{year}-{month:02d}_AnhBangCongNhanVien_{kind}.zip",
+        filename=filename,
     )
 
 
@@ -350,10 +374,17 @@ def download_final_copy_file(copy_id: str, kind: str, user: dict = Depends(requi
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     if kind == "output2":
+        filename = f"Output2{source_path.suffix}"
+        try_save_local_export_copy(
+            source_path,
+            "output2",
+            filename,
+            factory=_factory_from_final_copy_path(source_path),
+        )
         return FileResponse(
             source_path,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            filename=f"Output2{source_path.suffix}",
+            filename=filename,
         )
 
     output_dir = STORAGE_DIR / "exports" / "final_copies"
@@ -362,6 +393,12 @@ def download_final_copy_file(copy_id: str, kind: str, user: dict = Depends(requi
         export_final_copy_output1(source_path, output_path)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Không tạo được Output 1 từ bản sao cuối cùng: {exc}") from exc
+    try_save_local_export_copy(
+        output_path,
+        "output1",
+        "Output1.xlsx",
+        factory=_factory_from_final_copy_path(source_path),
+    )
     return FileResponse(
         output_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -387,6 +424,7 @@ def _download_final_copy_employee_images(copy_id: str, kind: str) -> FileRespons
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    factory = _factory_from_final_copy_path(source_path)
     output_dir = STORAGE_DIR / "exports" / "history_employee_images"
     safe_id = hashlib.sha256(copy_id.encode("utf-8")).hexdigest()[:20]
     capture_source = source_path
@@ -397,16 +435,18 @@ def _download_final_copy_employee_images(copy_id: str, kind: str) -> FileRespons
                 export_final_copy_output1(source_path, capture_source)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Không tạo được Output 1 từ bản sao cuối cùng: {exc}") from exc
-    output_path = output_dir / f"final_{safe_id}_{kind}.zip"
+    output_path = output_dir / f"final_{safe_id}_{factory}_{kind}.zip"
     try:
         if not _is_fresh_export(output_path, capture_source):
-            export_employee_screenshots_from_workbook(capture_source, output_path, kind)
+            export_employee_screenshots_from_workbook(capture_source, output_path, kind, factory=factory)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Không xuất được ảnh bảng công từ bản sao cuối cùng: {exc}") from exc
+    filename = f"AnhBangCongNhanVien_{kind}_{source_path.stem}.zip"
+    try_save_local_export_copy(output_path, "employee_cards", filename, factory=factory)
     return FileResponse(
         output_path,
         media_type="application/zip",
-        filename=f"AnhBangCongNhanVien_{kind}_{source_path.stem}.zip",
+        filename=filename,
     )
 
 
@@ -415,6 +455,13 @@ def _is_fresh_export(output_path: Path, source_path: Path) -> bool:
         return output_path.stat().st_size > 0 and output_path.stat().st_mtime_ns >= source_path.stat().st_mtime_ns
     except FileNotFoundError:
         return False
+
+
+def _factory_from_final_copy_path(source_path: Path) -> str:
+    normalized_parts = {part.replace(" ", "").casefold() for part in source_path.parts}
+    if "xuong2" in normalized_parts or source_path.name.replace(" ", "").casefold().startswith("xuong2_"):
+        return "factory2"
+    return "factory1"
 
 
 def _find_session_source(session_id: str) -> Path:

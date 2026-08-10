@@ -8,6 +8,7 @@ from app.api.routes_cloud import router as cloud_router
 from app.api.routes_history import router as history_router
 from app.api.routes_payroll import router as payroll_router
 from app.services.history_store import init_history_db
+from app.services.local_exports import ensure_local_export_folders
 
 
 app = FastAPI(title="Attendance Excel Processor", version="0.1.0")
@@ -32,6 +33,13 @@ app.include_router(history_router, prefix="/api")
 @app.on_event("startup")
 def startup() -> None:
     init_history_db()
+    try:
+        # Create both factory export trees immediately and finish any pending
+        # migration from the former shared folders once locked Excel files are
+        # released. Export failures must not prevent the API from starting.
+        ensure_local_export_folders()
+    except OSError:
+        pass
 
 
 @app.get("/health")

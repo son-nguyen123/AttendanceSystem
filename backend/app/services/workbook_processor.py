@@ -122,6 +122,7 @@ def export_processed_workbook(
             missing_count = override.get("missing_count", item.missing_count)
             late_minutes = override.get("late_minutes", item.late_minutes)
             work_value = override.get("work_value", item.work_value)
+            overtime_value = override.get("overtime_value")
 
             ws.cell(row=block.missing_row, column=item.column).value = (
                 missing_count if missing_count is not None and missing_count != "" else None
@@ -132,6 +133,10 @@ def export_processed_workbook(
             ws.cell(row=block.result_row, column=item.column).value = (
                 work_value if work_value is not None and work_value != "" else None
             )
+            if "overtime_value" in override:
+                ws.cell(row=block.result_row + 1, column=item.column).value = (
+                    overtime_value if overtime_value is not None and overtime_value != "" else None
+                )
         _center_attendance_numbers(ws, block)
         _write_output1_summary_block(ws, block, factory=factory)
 
@@ -439,19 +444,23 @@ def _review_overrides_by_employee_day(items: list[dict]) -> dict[tuple[str, int]
             target["late_minutes"] = item.get("late_minutes")
         if "work_value" in item:
             target["work_value"] = item.get("work_value")
+        if "overtime_value" in item:
+            target["overtime_value"] = item.get("overtime_value")
     return result
 
 
 def _select_attendance_sheet(wb):
     best_sheet = None
-    best_count = -1
+    best_score = (-1, -1, -1)
     for ws in wb.worksheets:
-        count = sum(1 for row in range(1, ws.max_row + 1) if ws.cell(row=row, column=1).value == "Att. Time")
-        if count > best_count:
+        blocks = detect_employee_blocks(ws)
+        codes = [block.employee_code for block in blocks]
+        score = (len(set(codes)), -(len(codes) - len(set(codes))), len(blocks))
+        if score > best_score:
             best_sheet = ws
-            best_count = count
+            best_score = score
 
-    if best_sheet is None or best_count <= 0:
+    if best_sheet is None or best_score[0] <= 0:
         raise ValueError("Không tìm thấy sheet chấm công có dòng Att. Time")
 
     return best_sheet

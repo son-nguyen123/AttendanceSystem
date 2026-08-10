@@ -155,14 +155,16 @@ def _write_monthly_grand_total(ws, blocks) -> None:
 
 def _select_attendance_sheet(wb):
     best_sheet = None
-    best_count = -1
+    best_score = (-1, -1, -1)
     for ws in wb.worksheets:
-        count = sum(1 for row in range(1, ws.max_row + 1) if ws.cell(row=row, column=1).value == "Att. Time")
-        if count > best_count:
+        blocks = detect_employee_blocks(ws)
+        codes = [block.employee_code for block in blocks]
+        score = (len(set(codes)), -(len(codes) - len(set(codes))), len(blocks))
+        if score > best_score:
             best_sheet = ws
-            best_count = count
+            best_score = score
 
-    if best_sheet is None or best_count <= 0:
+    if best_sheet is None or best_score[0] <= 0:
         raise ValueError("Không tìm thấy sheet chấm công có dòng Att. Time")
 
     return best_sheet
@@ -181,12 +183,20 @@ def _build_employee_preview(
         entry = PayrollEntry()
     source_values = source_values or {}
     total_hours = _prefer_source_number(source_values, "total_hours", _sum_work_hours(ws, block.result_row)) or 0
-    monthly_salary = _prefer_source_number(source_values, "monthly_salary", calculate_monthly_salary(entry) if include_saved_data else None)
+    monthly_salary = (
+        _parse_number(source_values.get("monthly_salary"))
+        if "monthly_salary" in source_values
+        else calculate_monthly_salary(entry) if include_saved_data else None
+    )
     daily_salary = _prefer_source_number(source_values, "daily_salary", calculate_daily_salary(entry) if include_saved_data else 0)
     hourly_salary = _prefer_source_number(source_values, "hourly_salary", calculate_hourly_salary(entry) if include_saved_data else 0)
     work_days = _prefer_source_number(source_values, "work_days", total_hours / 8)
     overtime_hours = _prefer_source_number(source_values, "overtime_hours", _sum_work_hours(ws, block.result_row + 1)) or 0
-    bonus = _prefer_source_number(source_values, "bonus", entry.bonus if include_saved_data else None)
+    bonus = (
+        _parse_number(source_values.get("bonus"))
+        if "bonus" in source_values
+        else entry.bonus if include_saved_data else None
+    )
     # A frame conversion keeps period-specific values from that exact source
     # workbook. Normal monthly exports still leave them empty because no
     # source_payroll_values are supplied.
@@ -330,6 +340,11 @@ def _write_payroll_block(ws, block, preview: dict, source_values: dict | None = 
     advance_letter = get_column_letter(advance_col)
 
     source_values = source_values or {}
+
+    # Clear legacy metadata before writing the account in the current AI
+    # position; otherwise an old account can remain duplicated in AH.
+    for col in range(PAYROLL_START_COL, PAYROLL_END_COL + 1):
+        ws.cell(row=result_row - 1, column=col).value = None
 
     def has_source_value(key: str) -> bool:
         return key in source_values and source_values[key] not in (None, "")

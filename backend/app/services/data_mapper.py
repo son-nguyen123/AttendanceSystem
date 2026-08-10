@@ -553,7 +553,7 @@ def _semantic_bank_account_value(
     result_row: int,
     code_col: int,
     fields: dict[str, int],
-) -> str | None:
+) -> tuple[str | None, str | None]:
     """Read the account number kept one row above the employee name in legacy files."""
     name_col = fields.get("name") or code_col + 1
     for row in range(header_row + 1, result_row):
@@ -601,6 +601,22 @@ def _semantic_start_work_and_note(
             value = _plain_text_value(values_ws.cell(note_row, col).value)
             if value and value not in note_parts:
                 note_parts.append(value)
+
+    # Some owner-edited legacy sheets keep a free-form note in the yellow row
+    # immediately above the employee result. Preserve it without treating an
+    # account number or copied field label as a note.
+    pre_result_row = result_row - 1
+    if pre_result_row > 0:
+        for col in range(name_col, source_ws.max_column + 1):
+            raw_value = values_ws.cell(pre_result_row, col).value
+            if _bank_account_text(raw_value):
+                continue
+            value = _plain_text_value(raw_value)
+            if not value or value in note_parts:
+                continue
+            if _semantic_field_name(_normalize_label(value)) is not None:
+                continue
+            note_parts.append(value)
 
     if start_work_note or note_parts:
         return start_work_note, " | ".join(note_parts) or None

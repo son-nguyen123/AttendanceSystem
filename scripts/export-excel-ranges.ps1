@@ -30,6 +30,8 @@ try {
         $worksheet = $null
         $range = $null
         $chartObject = $null
+        $lastError = $null
+        $stage = "khoi tao"
         try {
             $worksheet = $workbook.Worksheets.Item([string]$job.sheet)
             [void]$worksheet.Activate()
@@ -38,20 +40,49 @@ try {
             $exported = $false
 
             for ($attempt = 1; $attempt -le 3 -and -not $exported; $attempt++) {
-                [void]$range.CopyPicture(1, 2)
-                Start-Sleep -Milliseconds (120 * $attempt)
-                $chartObject = $worksheet.ChartObjects().Add(0, 0, [Math]::Max(1, $range.Width), [Math]::Max(1, $range.Height))
-                [void]$chartObject.Chart.Paste()
-                Start-Sleep -Milliseconds (100 * $attempt)
-                [void]$chartObject.Chart.Export($outputPath, "PNG")
-                $exported = (Test-Path -LiteralPath $outputPath) -and ((Get-Item -LiteralPath $outputPath).Length -gt 0)
-                $chartObject.Delete()
-                Release-ComObject $chartObject
-                $chartObject = $null
+                try {
+                    # CopyPicture can transiently return 0x800A03EC immediately
+                    # after Excel opens a workbook or switches worksheets. Make
+                    # the target range active and retry the complete clipboard
+                    # operation instead of aborting after the first COM error.
+                    $stage = "kich hoat vung"
+                    [void]$worksheet.Activate()
+                    [void]$excel.Goto($range, $true)
+                    Start-Sleep -Milliseconds (180 * $attempt)
+
+                    $stage = "CopyPicture"
+                    [void]$range.CopyPicture(1, 2)
+                    Start-Sleep -Milliseconds (240 * $attempt)
+
+                    $stage = "tao bieu do tam"
+                    $chartObject = $worksheet.ChartObjects().Add(0, 0, [Math]::Max(1, $range.Width), [Math]::Max(1, $range.Height))
+                    [void]$chartObject.Activate()
+
+                    $stage = "dan anh"
+                    [void]$chartObject.Chart.Paste()
+                    Start-Sleep -Milliseconds (180 * $attempt)
+
+                    $stage = "xuat PNG"
+                    [void]$chartObject.Chart.Export($outputPath, "PNG")
+                    $exported = (Test-Path -LiteralPath $outputPath) -and ((Get-Item -LiteralPath $outputPath).Length -gt 0)
+                } catch {
+                    $lastError = $_.Exception.Message
+                } finally {
+                    if ($chartObject) {
+                        try { $chartObject.Delete() } catch {}
+                    }
+                    Release-ComObject $chartObject
+                    $chartObject = $null
+                    try { $excel.CutCopyMode = $false } catch {}
+                }
+
+                if (-not $exported) {
+                    Start-Sleep -Milliseconds (300 * $attempt)
+                }
             }
 
             if (-not $exported -or -not (Test-Path -LiteralPath $outputPath)) {
-                throw "Excel khong xuat duoc anh cho vung $($job.range)"
+                throw "Excel khong xuat duoc anh cho vung $($job.range) tai buoc $stage sau 3 lan thu: $lastError"
             }
         } finally {
             if ($chartObject) {

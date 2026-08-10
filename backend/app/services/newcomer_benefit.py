@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 from app.services.attendance_calculator import calculate_day, _round_work_minutes
 from app.services.history_store import get_latest_period_snapshot, list_known_employee_codes_before_period
+from app.services.payroll_store import list_final_copy_employee_codes_before_period
 from app.services.punch_parser import time_to_minutes, minutes_to_time
 
 
@@ -9,7 +10,10 @@ MORNING_START = 7 * 60 + 30
 MORNING_END_LIMIT = 12 * 60 + 10
 AFTERNOON_START = 13 * 60
 AFTERNOON_ENTRY_LIMIT = 16 * 60 + 39
-AFTERNOON_END_LIMIT = 17 * 60 + 39
+# An afternoon shift can legitimately include overtime until 19:00.  Keeping
+# the old 17:39 cutoff split a complete 12:55-18:35 pair into two one-punch
+# shifts and then granted a four-hour newcomer allowance on top of real work.
+AFTERNOON_END_LIMIT = 19 * 60
 EVENING_START = 18 * 60
 EVENING_ENTRY_MIN = 16 * 60 + 40
 EVENING_OUT_MIN = 21 * 60 + 30
@@ -32,6 +36,7 @@ def apply_newcomer_first_day_benefits(analysis: dict, factory: str) -> list[dict
     month = int(period.get("month") or 0)
     year = int(period.get("year") or 0)
     known_codes = set(list_known_employee_codes_before_period(factory, month, year))
+    known_codes.update(list_final_copy_employee_codes_before_period(factory, month, year))
     overrides: list[dict] = []
     affected_keys: set[tuple[str, int]] = set()
     replacement_checks: dict[tuple[str, int], list[str]] = {}
