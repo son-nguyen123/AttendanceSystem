@@ -16,6 +16,7 @@ from app.services.drive_backup import (
     delete_drive_period_files,
     default_backup_dir,
     drive_backup_paths,
+    find_latest_new_layout_backup,
     list_final_excel_copies,
     list_analysis_excel_copies,
     resolve_final_excel_copy,
@@ -340,6 +341,33 @@ def _filename_from_submission(submission: dict[str, Any]) -> str:
 def backup_enabled() -> bool:
     config = get_cloud_config()
     return bool(config["drive_backup_enabled"] and config["backup_on_history_change"])
+
+
+def repair_last_backup_path() -> dict[str, Any]:
+    """Repair the Drive shortcut after moving backups to the new folder tree."""
+
+    config = _read_config()
+    root_value = config.get("drive_root_path") or config.get("drive_backup_dir")
+    if not root_value:
+        return {"status": "skipped", "reason": "drive_root_missing"}
+
+    root = Path(str(root_value)).expanduser()
+    raw_path = str(config.get("last_backup_path") or "").strip()
+    current_path = Path(raw_path).expanduser() if raw_path else None
+    legacy_path = current_path and any(part in {"ExcelDaLuu", "DuLieuNganHang"} for part in current_path.parts)
+    if current_path and current_path.exists() and not legacy_path:
+        return {"status": "unchanged", "path": str(current_path)}
+
+    latest = find_latest_new_layout_backup(root)
+    if latest is None:
+        return {"status": "skipped", "reason": "no_new_layout_backup"}
+
+    _update_config(last_backup_path=str(latest), last_backup_error=None)
+    return {
+        "status": "repaired",
+        "old_path": raw_path or None,
+        "path": str(latest),
+    }
 
 
 def run_drive_backup(reason: str = "manual") -> dict[str, Any]:

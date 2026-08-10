@@ -8,7 +8,7 @@ from app.api.routes_cloud import router as cloud_router
 from app.api.routes_history import router as history_router
 from app.api.routes_payroll import router as payroll_router
 from app.services.history_store import init_history_db
-from app.services.cloud_sync import get_cloud_config
+from app.services.cloud_sync import get_cloud_config, repair_last_backup_path
 from app.services.drive_backup import migrate_legacy_drive_folders
 from app.services.local_exports import ensure_local_export_folders
 
@@ -43,6 +43,7 @@ def startup() -> None:
         config = get_cloud_config()
         if config.get("drive_backup_enabled"):
             migrate_legacy_drive_folders(config.get("drive_backup_dir") or "")
+            repair_last_backup_path()
     except OSError:
         pass
 

@@ -157,6 +157,49 @@ def ensure_drive_export_folders(root: Path | str) -> dict[str, Path]:
     return result
 
 
+def find_latest_new_layout_backup(root: Path | str) -> Path | None:
+    """Find the newest backup target in the current Drive layout.
+
+    ``last_backup_path`` used to point into ``ExcelDaLuu``.  That folder is
+    intentionally removed during migration, so startup needs a safe way to
+    recover the shortcut from files that already exist in the new tree.
+    """
+
+    base = Path(root).expanduser()
+    if not base.exists():
+        return None
+
+    candidates: list[Path] = []
+    system_backup_dir = base / "_System_Backup_Zip"
+    if system_backup_dir.exists():
+        candidates.extend(path for path in system_backup_dir.glob("*.zip") if path.is_file())
+
+    for factory in ("Xuong1", "Xuong2"):
+        history_root = base / factory / DRIVE_EXPORT_FOLDERS["history"]
+        if not history_root.exists():
+            continue
+
+        final_files = [
+            path
+            for path in history_root.glob("*/Thang_*/BanSaoCuoiCung/*")
+            if path.is_file() and path.suffix.lower() in FINAL_COPY_EXTENSIONS
+        ]
+        if final_files:
+            candidates.extend(final_files)
+            continue
+
+        candidates.extend(
+            path
+            for path in history_root.glob("*/Thang_*")
+            if path.is_dir()
+        )
+
+    if not candidates:
+        return None
+
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
 def create_period_excel_backup(config: dict[str, Any], detail: dict[str, Any], reason: str = "save_history") -> dict[str, Any]:
     period = detail.get("period") or {}
     factory = _normalize_factory(period.get("factory"))

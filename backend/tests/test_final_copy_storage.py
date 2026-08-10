@@ -7,10 +7,34 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services import drive_backup
+from app.services import cloud_sync
 from backend.tests.test_workbook_guard import _write_output2
 
 
 class FinalCopyStorageTests(unittest.TestCase):
+    def test_stale_last_backup_path_is_repaired_to_new_layout(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            stale = root / "ExcelDaLuu" / "Xuong2" / "old.xlsx"
+            current = root / "Xuong2" / "08_BanChot_LichSu" / "2026" / "Thang_07" / "BanSaoCuoiCung" / "current.xlsx"
+            current.parent.mkdir(parents=True)
+            current.write_bytes(b"final")
+            config = {
+                "drive_backup_dir": str(root),
+                "drive_root_path": str(root),
+                "last_backup_path": str(stale),
+            }
+
+            with (
+                patch.object(cloud_sync, "_read_config", return_value=config),
+                patch.object(cloud_sync, "_update_config") as update_config,
+            ):
+                result = cloud_sync.repair_last_backup_path()
+
+            self.assertEqual(result["status"], "repaired")
+            self.assertEqual(result["path"], str(current))
+            update_config.assert_called_once_with(last_backup_path=str(current), last_backup_error=None)
+
     def test_legacy_drive_tree_is_migrated_to_local_style_tree(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
