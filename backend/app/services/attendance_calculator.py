@@ -63,6 +63,7 @@ def calculate_day(punches: list[str]) -> CalculationResult:
         return CalculationResult(None, None, None, [])
 
     times = sorted({time_to_minutes(punch) for punch in punches})
+    late_afternoon_review_gap = _find_late_afternoon_review_gap(times)
     # Two distinct marks around the end of the afternoon, followed by a clear
     # evening checkout, mean "afternoon checkout + evening restart".  Preserve
     # that pair before applying the broader habitual-punch cluster rule.
@@ -91,6 +92,14 @@ def calculate_day(punches: list[str]) -> CalculationResult:
     unusual_morning_pair = _unusual_morning_work_pair(times)
     ambiguous_new_early_evening = _has_ambiguous_new_early_evening_sequence(times)
     invalid_pre_evening_sequence = _has_invalid_pre_evening_sequence(times)
+
+    if late_afternoon_review_gap is not None:
+        start, end = late_afternoon_review_gap
+        missing_count = "?"
+        manual_checks.append(
+            "Có dấu hiệu ra/vào cuối ca chiều "
+            f"{minutes_to_time(start)}-{minutes_to_time(end)}, cần kiểm tra"
+        )
 
     if mid_shift_gaps:
         missing_count = "?"
@@ -279,6 +288,33 @@ def _is_unclassified_late_pair(start: int, end: int) -> bool:
         and UNCLASSIFIED_LATE_OUT_MIN <= end < EVENING_OUT_MIN
         and end > start
     )
+
+
+def _find_late_afternoon_review_gap(times: list[int]) -> tuple[int, int] | None:
+    """Flag a possible afternoon exit/re-entry at the shift boundary.
+
+    The final two punches are intentionally not deducted because the return
+    happens after 17:00 and may instead be an end-of-afternoon punch cluster.
+    """
+    significant_times = _collapse_duplicate_punches(times)
+    if len(significant_times) != 4 or _has_evening_out(significant_times):
+        return None
+
+    afternoon_entries = _afternoon_in_times(significant_times)
+    if not afternoon_entries or significant_times[0] not in afternoon_entries:
+        return None
+
+    _entry, middle_out, late_return, final_out = significant_times
+    if not (AFTERNOON_START < middle_out < AFTERNOON_END):
+        return None
+    if not (AFTERNOON_END <= late_return <= EARLY_EVENING_START_MAX):
+        return None
+    if not (late_return < final_out <= AFTERNOON_CHECKOUT_CLUSTER_END):
+        return None
+    if late_return - middle_out < MID_SHIFT_GAP_MINUTES:
+        return None
+
+    return middle_out, late_return
 
 
 def _find_unclassified_late_pair(times: list[int]) -> tuple[int, int] | None:

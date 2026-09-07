@@ -70,6 +70,16 @@ def test_late_pair_after_completed_morning_is_provisional_and_additive() -> None
     assert any("ngoài khung ca chuẩn" in message for message in result.manual_checks)
 
 
+def test_late_afternoon_reentry_is_reviewed_without_deduction() -> None:
+    result = calculate_day(["12:57", "15:10", "17:02", "17:31"])
+
+    assert result.work_value == 4.5
+    assert result.missing_count == "?"
+    assert result.late_minutes is None
+    assert any("15:10-17:02" in message for message in result.manual_checks)
+    assert not any("trừ" in message for message in result.manual_checks)
+
+
 def test_seventeen_oh_seven_evening_pair_stays_standard_evening() -> None:
     result = calculate_day(["17:07", "22:00"])
 
