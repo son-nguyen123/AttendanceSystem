@@ -66,6 +66,7 @@ def test_late_pair_after_completed_morning_is_provisional_and_additive() -> None
 
     assert result.work_value == 8
     assert result.missing_count == "?"
+    assert result.late_minutes is None
     assert any("ngoài khung ca chuẩn" in message for message in result.manual_checks)
 
 

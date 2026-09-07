@@ -71,8 +71,13 @@ def calculate_day(punches: list[str]) -> CalculationResult:
     manual_checks: list[str] = []
     original_missing_count = _detect_missing_count(times)
     missing_count = original_missing_count
+    unclassified_late_pair = _find_unclassified_late_pair(times)
     has_unpaired_evening_mark = _has_unpaired_evening_mark(times)
-    late_events = _detect_late_events(times, suppress_unpaired_evening=has_unpaired_evening_mark)
+    late_events = _detect_late_events(
+        times,
+        suppress_unpaired_evening=has_unpaired_evening_mark,
+        suppress_unclassified_late_pair=unclassified_late_pair is not None,
+    )
     early_evening_late = _early_evening_overtime_late_minutes(times)
     if early_evening_late is not None:
         late_events.append(early_evening_late)
@@ -142,7 +147,6 @@ def calculate_day(punches: list[str]) -> CalculationResult:
     work_value = _calculate_work_value(times)
     if ambiguous_new_early_evening or invalid_pre_evening_sequence:
         work_value = None
-    unclassified_late_pair = _find_unclassified_late_pair(times)
     if work_value is not None and unclassified_late_pair is not None:
         start, end = unclassified_late_pair
         work_value = _clean(float(work_value) + _round_work_minutes(end - start))
@@ -844,7 +848,11 @@ def _detect_late_minutes(times: list[int]) -> int | None:
     return max(late_values) if late_values else None
 
 
-def _detect_late_events(times: list[int], suppress_unpaired_evening: bool = False) -> list[int]:
+def _detect_late_events(
+    times: list[int],
+    suppress_unpaired_evening: bool = False,
+    suppress_unclassified_late_pair: bool = False,
+) -> list[int]:
     late_values: list[int] = []
 
     morning_in = _late_for_shift(times, 5 * 60, MORNING_START, MORNING_START + LATE_DETECTION_WINDOW)
@@ -866,7 +874,7 @@ def _detect_late_events(times: list[int], suppress_unpaired_evening: bool = Fals
             short_duty_start, _checkout = short_duty_pair
             late_values.append(short_duty_start - EARLY_EVENING_START)
 
-    if not suppress_unpaired_evening:
+    if not suppress_unpaired_evening and not suppress_unclassified_late_pair:
         evening_in = _late_for_shift(times, 16 * 60 + 30, EVENING_START, EVENING_START + LATE_DETECTION_WINDOW)
         if evening_in is not None and not has_afternoon_in:
             late_values.append(evening_in)
