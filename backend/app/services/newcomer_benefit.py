@@ -1,6 +1,10 @@
 from dataclasses import dataclass
 
-from app.services.attendance_calculator import calculate_day, _round_work_minutes
+from app.services.attendance_calculator import (
+    calculate_day,
+    _is_unclassified_late_pair,
+    _round_work_minutes,
+)
 from app.services.history_store import get_latest_period_snapshot, list_known_employee_codes_before_period
 from app.services.payroll_store import list_final_copy_employee_codes_before_period
 from app.services.punch_parser import time_to_minutes, minutes_to_time
@@ -25,6 +29,7 @@ class ShiftEvidence:
     punches: list[int]
     fixed_start: int
     maximum_hours: float
+    onboarding_eligible: bool = True
 
 
 def apply_newcomer_first_day_benefits(analysis: dict, factory: str) -> list[dict]:
@@ -106,13 +111,22 @@ def _newcomer_day_adjustment(result: dict) -> dict | None:
     benefit_hours = _benefit_hours(selected)
     current_work = _number(result.get("work_value"))
     selected_work = _number(selected_result.work_value)
-    adjusted_work = _clean(max(0, current_work - selected_work + benefit_hours))
-
     remaining_results = [
         calculate_day([minutes_to_time(value) for value in shift.punches])
         for index, shift in enumerate(shifts)
         if index != selected_index
     ]
+    remaining_work = sum(
+        _number(item.work_value)
+        for item in remaining_results
+    )
+    adjusted_work = _clean(
+        max(
+            0,
+            current_work - selected_work + benefit_hours,
+            benefit_hours + remaining_work,
+        )
+    )
     remaining_late = sum(item.late_minutes or 0 for item in remaining_results) or None
     remaining_missing: int | str | None
     if any(item.missing_count == "?" for item in remaining_results):
@@ -159,6 +173,10 @@ def _split_shift_evidence(times: list[int]) -> list[ShiftEvidence]:
         shifts.append(ShiftEvidence("tối", remaining, EVENING_START, 4))
         remaining = []
 
+    if len(remaining) == 2 and _is_unclassified_late_pair(*remaining):
+        shifts.append(ShiftEvidence("ngoài khung", remaining, remaining[0], 4, False))
+        remaining = []
+
     afternoon = [value for value in remaining if value <= AFTERNOON_END_LIMIT]
     if afternoon:
         shifts.append(ShiftEvidence("chiều", afternoon, AFTERNOON_START, 4.5))
@@ -171,6 +189,8 @@ def _split_shift_evidence(times: list[int]) -> list[ShiftEvidence]:
 
 
 def _shift_needs_onboarding_benefit(shift: ShiftEvidence) -> bool:
+    if not shift.onboarding_eligible:
+        return False
     result = calculate_day([minutes_to_time(value) for value in shift.punches])
     first = shift.punches[0]
     return (

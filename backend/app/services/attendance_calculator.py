@@ -37,6 +37,9 @@ EVENING_REVIEW_REMAINDER_MINUTES = 32
 EVENING_ROUND_UP_MINUTE = 53
 AFTERNOON_ROUND_UP_MINUTE = 53
 DIRECT_EVENING_MIN_DURATION = 60
+UNCLASSIFIED_LATE_ENTRY_MIN = 16 * 60
+UNCLASSIFIED_LATE_ENTRY_MAX = 16 * 60 + 39
+UNCLASSIFIED_LATE_OUT_MIN = 19 * 60
 
 
 @dataclass(frozen=True)
@@ -139,6 +142,12 @@ def calculate_day(punches: list[str]) -> CalculationResult:
     work_value = _calculate_work_value(times)
     if ambiguous_new_early_evening or invalid_pre_evening_sequence:
         work_value = None
+    unclassified_late_pair = _find_unclassified_late_pair(times)
+    if work_value is not None and unclassified_late_pair is not None:
+        start, end = unclassified_late_pair
+        work_value = _clean(float(work_value) + _round_work_minutes(end - start))
+        missing_count = "?"
+        manual_checks.append("Đã tính tạm từ cặp giờ ngoài khung ca chuẩn, cần kiểm tra")
     if work_value is None:
         provisional_work = _calculate_unclassified_pair_work(times)
         if provisional_work is not None:
@@ -257,6 +266,36 @@ def _unclassified_pair_hours(start: int, end: int) -> float:
 def _is_lunch_boundary_pair(start: int, end: int) -> bool:
     """Prevent a morning checkout and afternoon entry becoming paid work."""
     return 11 * 60 <= start <= NOON_OUT_END and end > NOON_OUT_END
+
+
+def _is_unclassified_late_pair(start: int, end: int) -> bool:
+    """Recognize a complete late-day pair outside the standard shift windows."""
+    return (
+        UNCLASSIFIED_LATE_ENTRY_MIN <= start <= UNCLASSIFIED_LATE_ENTRY_MAX
+        and UNCLASSIFIED_LATE_OUT_MIN <= end < EVENING_OUT_MIN
+        and end > start
+    )
+
+
+def _find_unclassified_late_pair(times: list[int]) -> tuple[int, int] | None:
+    """Find a late pair after a completed morning shift for provisional pay."""
+    significant_times = _collapse_duplicate_punches(times)
+    morning_entries = [value for value in significant_times if value <= MORNING_START + 60]
+    morning_checkouts = [
+        value
+        for value in significant_times
+        if MORNING_END - 30 <= value <= NOON_OUT_END
+        and any(entry < value for entry in morning_entries)
+    ]
+    if not morning_checkouts:
+        return None
+
+    remaining = [value for value in significant_times if value > max(morning_checkouts)]
+    if len(remaining) != 2:
+        return None
+
+    start, end = remaining
+    return (start, end) if _is_unclassified_late_pair(start, end) else None
 
 
 def _morning_hours(times: list[int]) -> float:
@@ -953,6 +992,8 @@ def _has_evening_start_candidate(times: list[int]) -> bool:
 
 
 def _has_unpaired_evening_mark(times: list[int]) -> bool:
+    if _find_unclassified_late_pair(times) is not None:
+        return False
     if _has_afternoon_in(times) or _is_early_evening_overtime(times):
         return False
     if _early_evening_direct_split_pair(times) is not None:

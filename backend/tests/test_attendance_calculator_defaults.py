@@ -61,6 +61,21 @@ def test_clear_direct_evening_pair_does_not_require_remainder_review() -> None:
     assert result.manual_checks == []
 
 
+def test_late_pair_after_completed_morning_is_provisional_and_additive() -> None:
+    result = calculate_day(["07:06", "11:30", "16:07", "20:03"])
+
+    assert result.work_value == 8
+    assert result.missing_count == "?"
+    assert any("ngoài khung ca chuẩn" in message for message in result.manual_checks)
+
+
+def test_seventeen_oh_seven_evening_pair_stays_standard_evening() -> None:
+    result = calculate_day(["17:07", "22:00"])
+
+    assert result.work_value == 4
+    assert result.missing_count is None
+
+
 def test_clear_evening_pair_after_morning_shift_is_not_ambiguous() -> None:
     result = calculate_day(["07:23", "11:31", "17:39", "22:01"])
 

@@ -86,6 +86,21 @@ def test_first_day_ambiguous_early_evening_pair_becomes_standard_evening(monkeyp
     assert result["late_minutes"] is None
 
 
+def test_first_day_newcomer_replaces_only_unusual_morning_pair(monkeypatch) -> None:
+    _enable_first_time_employee(monkeypatch)
+    punches = ["11:07", "11:31", "16:56", "22:01"]
+    analysis = _analysis("1441", 26, punches)
+
+    assert analysis["blocks"][0]["results"][0]["work_value"] == 0.25
+
+    newcomer_benefit.apply_newcomer_first_day_benefits(analysis, "factory1")
+    result = analysis["blocks"][0]["results"][0]
+
+    assert result["work_value"] == 9
+    assert result["missing_count"] is None
+    assert result["late_minutes"] is None
+
+
 def test_first_day_keeps_anomaly_from_later_shift(monkeypatch) -> None:
     _enable_first_time_employee(monkeypatch)
     punches = ["08:41", "11:32", "13:00", "15:00", "15:20", "17:02"]
