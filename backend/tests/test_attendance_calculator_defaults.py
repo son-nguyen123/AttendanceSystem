@@ -70,14 +70,33 @@ def test_late_pair_after_completed_morning_is_provisional_and_additive() -> None
     assert any("ngoài khung ca chuẩn" in message for message in result.manual_checks)
 
 
-def test_late_afternoon_reentry_is_reviewed_without_deduction() -> None:
+def test_late_afternoon_reentry_is_reviewed_and_deducted() -> None:
     result = calculate_day(["12:57", "15:10", "17:02", "17:31"])
 
-    assert result.work_value == 4.5
+    assert result.work_value == 2.5
     assert result.missing_count == "?"
     assert result.late_minutes is None
     assert any("15:10-17:02" in message for message in result.manual_checks)
-    assert not any("trừ" in message for message in result.manual_checks)
+    assert any("trừ 120 phút" in message for message in result.manual_checks)
+
+
+def test_boundary_gap_does_not_override_internal_afternoon_gap_rule() -> None:
+    result = calculate_day(["13:01", "14:58", "16:45", "17:32"])
+
+    assert result.work_value == 2.5
+    assert result.missing_count == "?"
+    assert result.late_minutes == 1
+    assert any("14:58-16:45" in message for message in result.manual_checks)
+    assert not any("16:45-17:32" in message for message in result.manual_checks)
+
+
+def test_boundary_gap_does_not_override_clear_evening_restart() -> None:
+    result = calculate_day(["12:53", "17:01", "17:31", "22:01"])
+
+    assert result.work_value == 8
+    assert result.missing_count is None
+    assert result.late_minutes is None
+    assert result.manual_checks == []
 
 
 def test_seventeen_oh_seven_evening_pair_stays_standard_evening() -> None:

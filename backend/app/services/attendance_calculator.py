@@ -89,6 +89,15 @@ def calculate_day(punches: list[str]) -> CalculationResult:
     ]
     late_minutes = sum(late_events) if late_events else None
     mid_shift_gaps = _detect_mid_shift_gaps(times)
+    boundary_mid_shift_gap = None
+    if late_afternoon_review_gap is not None:
+        start, end = late_afternoon_review_gap
+        boundary_mid_shift_gap = MidShiftGap(
+            start=start,
+            end=end,
+            minutes=end - start,
+            rounded_minutes=_rounded_penalty_minutes(end - start),
+        )
     unusual_morning_pair = _unusual_morning_work_pair(times)
     ambiguous_new_early_evening = _has_ambiguous_new_early_evening_sequence(times)
     invalid_pre_evening_sequence = _has_invalid_pre_evening_sequence(times)
@@ -98,7 +107,9 @@ def calculate_day(punches: list[str]) -> CalculationResult:
         missing_count = "?"
         manual_checks.append(
             "Có dấu hiệu ra/vào cuối ca chiều "
-            f"{minutes_to_time(start)}-{minutes_to_time(end)}, cần kiểm tra"
+            f"{minutes_to_time(start)}-{minutes_to_time(end)}: "
+            f"{end - start} phút, trừ "
+            f"{_rounded_penalty_minutes(end - start)} phút, cần kiểm tra"
         )
 
     if mid_shift_gaps:
@@ -177,6 +188,8 @@ def calculate_day(punches: list[str]) -> CalculationResult:
         work_value = 0
     elif isinstance(work_value, (int, float)):
         deduction_minutes = sum(gap.rounded_minutes for gap in mid_shift_gaps)
+        if boundary_mid_shift_gap is not None:
+            deduction_minutes += boundary_mid_shift_gap.rounded_minutes
         deduction_minutes += sum(_rounded_penalty_minutes(value) for value in chargeable_late_events)
         if deduction_minutes > 0:
             work_value = _clean(max(0, float(work_value) - deduction_minutes / 60))
@@ -293,8 +306,9 @@ def _is_unclassified_late_pair(start: int, end: int) -> bool:
 def _find_late_afternoon_review_gap(times: list[int]) -> tuple[int, int] | None:
     """Flag a possible afternoon exit/re-entry at the shift boundary.
 
-    The final two punches are intentionally not deducted because the return
-    happens after 17:00 and may instead be an end-of-afternoon punch cluster.
+    The boundary gap is deducted using the existing rounded-gap rule, but it
+    remains marked for manual review because the return happens after 17:00
+    and may instead be an end-of-afternoon punch cluster.
     """
     significant_times = _collapse_duplicate_punches(times)
     if len(significant_times) != 4 or _has_evening_out(significant_times):
