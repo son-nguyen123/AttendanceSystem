@@ -12,6 +12,7 @@ EARLY_EVENING_START = 17 * 60
 EARLY_EVENING_START_MIN = 16 * 60 + 40
 LEGACY_EARLY_EVENING_START_MIN = 16 * 60 + 45
 EARLY_EVENING_START_MAX = 17 * 60 + 7
+LATE_AFTERNOON_REVIEW_RETURN_MAX = 17 * 60 + 15
 SHORT_EVENING_DUTY_START_MIN = 16 * 60 + 45
 SHORT_EVENING_DUTY_START_MAX = 17 * 60 + 24
 SHORT_EVENING_DUTY_OUT_MIN = 17 * 60 + 25
@@ -321,7 +322,7 @@ def _find_late_afternoon_review_gap(times: list[int]) -> tuple[int, int] | None:
     _entry, middle_out, late_return, final_out = significant_times
     if not (AFTERNOON_START < middle_out < AFTERNOON_END):
         return None
-    if not (AFTERNOON_END <= late_return <= EARLY_EVENING_START_MAX):
+    if not (AFTERNOON_END <= late_return <= LATE_AFTERNOON_REVIEW_RETURN_MAX):
         return None
     if not (late_return < final_out <= AFTERNOON_CHECKOUT_CLUSTER_END):
         return None

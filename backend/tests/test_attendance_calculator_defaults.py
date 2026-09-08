@@ -80,6 +80,16 @@ def test_late_afternoon_reentry_is_reviewed_and_deducted() -> None:
     assert any("trừ 120 phút" in message for message in result.manual_checks)
 
 
+def test_late_afternoon_reentry_at_seventeen_eight_is_reviewed_and_deducted() -> None:
+    result = calculate_day(["12:57", "15:10", "17:08", "17:31"])
+
+    assert result.work_value == 2.5
+    assert result.missing_count == "?"
+    assert result.late_minutes is None
+    assert any("17:08" in message for message in result.manual_checks)
+    assert any("trừ 120 phút" in message for message in result.manual_checks)
+
+
 def test_boundary_gap_does_not_override_internal_afternoon_gap_rule() -> None:
     result = calculate_day(["13:01", "14:58", "16:45", "17:32"])
 
@@ -97,6 +107,15 @@ def test_boundary_gap_does_not_override_clear_evening_restart() -> None:
     assert result.missing_count is None
     assert result.late_minutes is None
     assert result.manual_checks == []
+
+
+def test_seventeen_eight_direct_evening_pair_keeps_existing_review() -> None:
+    result = calculate_day(["17:08", "22:00"])
+
+    assert result.work_value == 4
+    assert result.missing_count == "?"
+    assert result.late_minutes is None
+    assert any("17:08-17:15" in message for message in result.manual_checks)
 
 
 def test_seventeen_oh_seven_evening_pair_stays_standard_evening() -> None:
