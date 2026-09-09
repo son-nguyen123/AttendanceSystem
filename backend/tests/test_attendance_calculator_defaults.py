@@ -90,6 +90,33 @@ def test_late_afternoon_reentry_at_seventeen_eight_is_reviewed_and_deducted() ->
     assert any("trừ 120 phút" in message for message in result.manual_checks)
 
 
+def test_split_afternoon_short_duty_after_review_window_uses_two_pairs() -> None:
+    result = calculate_day(["12:57", "15:10", "17:17", "17:31"])
+
+    assert result.work_value == 2.5
+    assert result.missing_count == "?"
+    assert result.late_minutes is None
+    assert any("15:10-17:17" in message for message in result.manual_checks)
+    assert any("hai cặp giờ" in message for message in result.manual_checks)
+
+
+def test_split_afternoon_short_duty_starts_after_existing_review_boundary() -> None:
+    result = calculate_day(["12:57", "15:10", "17:15", "17:31"])
+
+    assert result.work_value == 2.5
+    assert result.missing_count == "?"
+    assert any("trừ 120 phút" in message for message in result.manual_checks)
+    assert not any("hai cặp giờ" in message for message in result.manual_checks)
+
+
+def test_split_afternoon_short_duty_requires_ten_minute_final_pair() -> None:
+    result = calculate_day(["12:57", "15:10", "17:25", "17:31"])
+
+    assert result.work_value == 4.5
+    assert result.missing_count is None
+    assert not any("hai cặp giờ" in message for message in result.manual_checks)
+
+
 def test_boundary_gap_does_not_override_internal_afternoon_gap_rule() -> None:
     result = calculate_day(["13:01", "14:58", "16:45", "17:32"])
 

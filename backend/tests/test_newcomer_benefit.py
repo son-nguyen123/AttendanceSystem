@@ -74,6 +74,22 @@ def test_first_day_early_checkout_keeps_actual_checkout(monkeypatch) -> None:
     assert analysis["blocks"][0]["results"][0]["work_value"] == 2.75
 
 
+def test_first_day_split_afternoon_short_duty_keeps_newcomer_rule(monkeypatch) -> None:
+    _enable_first_time_employee(monkeypatch)
+    analysis = _analysis("1502", 1, ["12:57", "15:10", "17:17", "17:31"])
+
+    assert analysis["blocks"][0]["results"][0]["work_value"] == 2.5
+    assert analysis["blocks"][0]["results"][0]["missing_count"] == "?"
+
+    overrides = newcomer_benefit.apply_newcomer_first_day_benefits(analysis, "factory1")
+    result = analysis["blocks"][0]["results"][0]
+
+    assert len(overrides) == 1
+    assert result["work_value"] == 4.5
+    assert result["missing_count"] is None
+    assert result["late_minutes"] is None
+
+
 def test_first_day_ambiguous_early_evening_pair_becomes_standard_evening(monkeypatch) -> None:
     _enable_first_time_employee(monkeypatch)
     analysis = _analysis("1426", 14, ["17:10", "22:02"])

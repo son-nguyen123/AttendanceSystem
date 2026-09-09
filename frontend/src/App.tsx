@@ -7,9 +7,8 @@ const WORKSPACE_RESTORE_TIMEOUT_MS = 8000
 const ANALYSIS_TIMEOUT_MS = 5 * 60 * 1000
 const ROLE_LOGIN_ENABLED = false
 const SMART_SETTINGS_KEY = 'attendance-smart-settings'
-// v8 invalidates the short-lived v7 workspace cache that could persist the raw
-// pre-benefit result while automatic newcomer overrides were already saved.
-const ATTENDANCE_CALCULATION_VERSION = 8
+// v9 reanalyzes saved workspaces with the split afternoon short-duty rule.
+const ATTENDANCE_CALCULATION_VERSION = 9
 
 type Summary = {
   blocks: number

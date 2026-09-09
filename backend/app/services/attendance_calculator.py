@@ -65,6 +65,7 @@ def calculate_day(punches: list[str]) -> CalculationResult:
 
     times = sorted({time_to_minutes(punch) for punch in punches})
     late_afternoon_review_gap = _find_late_afternoon_review_gap(times)
+    split_afternoon_short_duty = _find_split_afternoon_short_duty(times)
     # Two distinct marks around the end of the afternoon, followed by a clear
     # evening checkout, mean "afternoon checkout + evening restart".  Preserve
     # that pair before applying the broader habitual-punch cluster rule.
@@ -111,6 +112,15 @@ def calculate_day(punches: list[str]) -> CalculationResult:
             f"{minutes_to_time(start)}-{minutes_to_time(end)}: "
             f"{end - start} phút, trừ "
             f"{_rounded_penalty_minutes(end - start)} phút, cần kiểm tra"
+        )
+
+    if split_afternoon_short_duty is not None:
+        _entry, middle_out, late_return, _final_out = split_afternoon_short_duty
+        missing_count = "?"
+        manual_checks.append(
+            "Có dấu hiệu ra/vào rồi làm thêm ngắn cuối ca chiều "
+            f"{minutes_to_time(middle_out)}-{minutes_to_time(late_return)}; "
+            "đã tính theo hai cặp giờ, cần kiểm tra"
         )
 
     if mid_shift_gaps:
@@ -166,6 +176,10 @@ def calculate_day(punches: list[str]) -> CalculationResult:
         manual_checks.append(evening_remainder_warning)
 
     work_value = _calculate_work_value(times)
+    if split_afternoon_short_duty is not None:
+        entry, middle_out, late_return, final_out = split_afternoon_short_duty
+        worked_minutes = (middle_out - entry) + (final_out - late_return)
+        work_value = _round_work_minutes(worked_minutes)
     if ambiguous_new_early_evening or invalid_pre_evening_sequence:
         work_value = None
     if work_value is not None and unclassified_late_pair is not None:
@@ -330,6 +344,36 @@ def _find_late_afternoon_review_gap(times: list[int]) -> tuple[int, int] | None:
         return None
 
     return middle_out, late_return
+
+
+def _find_split_afternoon_short_duty(times: list[int]) -> tuple[int, int, int, int] | None:
+    """Recognize an afternoon work pair followed by a short duty pair.
+
+    The branch begins after the existing 17:00-17:15 review window and ends
+    before the evening-restart boundary. Requiring exactly four distinct,
+    significant punches prevents this rule from changing repeated checkout
+    clusters, newcomer fragments, and real shifts with a 22:00 checkout.
+    """
+    significant_times = _collapse_duplicate_punches(times)
+    if len(times) != 4 or len(significant_times) != 4 or _has_evening_out(times):
+        return None
+
+    entry, middle_out, late_return, final_out = significant_times
+    afternoon_entries = _afternoon_in_times(significant_times)
+    if not afternoon_entries or entry not in afternoon_entries:
+        return None
+    if not (entry < middle_out < AFTERNOON_END):
+        return None
+    if not (LATE_AFTERNOON_REVIEW_RETURN_MAX < late_return < final_out):
+        return None
+    if final_out > AFTERNOON_CHECKOUT_CLUSTER_END:
+        return None
+    if late_return - middle_out < MID_SHIFT_GAP_MINUTES:
+        return None
+    if final_out - late_return < 10:
+        return None
+
+    return entry, middle_out, late_return, final_out
 
 
 def _find_unclassified_late_pair(times: list[int]) -> tuple[int, int] | None:
