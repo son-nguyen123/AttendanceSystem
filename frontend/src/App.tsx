@@ -606,6 +606,7 @@ function App() {
   const [mappingAllowMissingBankAccounts, setMappingAllowMissingBankAccounts] = useState(false)
   const [output2BankMissing, setOutput2BankMissing] = useState<PayrollEmployee[]>([])
   const [output2BankAccounts, setOutput2BankAccounts] = useState<Record<string, string>>({})
+  const output2BusyRef = useRef(false)
   const [pendingFactorySwitch, setPendingFactorySwitch] = useState<FactoryMode | null>(null)
   const [smartSettingsOpen, setSmartSettingsOpen] = useState(false)
   const [supportOpen, setSupportOpen] = useState(false)
@@ -1836,11 +1837,11 @@ function App() {
   }
 
   function exportOutput2() {
-    if (!data) return
+    if (!data || output2BusyRef.current) return
     setOutput2ChoiceOpen(true)
   }
 
-  async function exportOutput2File(includeSavedData: boolean) {
+  async function exportOutput2File(includeSavedData: boolean, allowMissingBankAccounts = false) {
     if (!data) return
     setPayrollLoading(true)
     setError(null)
@@ -1852,6 +1853,7 @@ function App() {
           session_id: data!.session_id,
           review_overrides: buildReviewOverrides(payrollReviewItems),
           include_saved_data: includeSavedData,
+          allow_missing_bank_accounts: allowMissingBankAccounts,
         },
         { responseType: 'blob' },
       )
@@ -1872,7 +1874,10 @@ function App() {
   }
 
   async function runOutput2Export(includeSavedData: boolean) {
-    if (!data) return
+    if (!data || output2BusyRef.current) return
+    output2BusyRef.current = true
+    setOutput2ChoiceOpen(false)
+    setPayrollLoading(true)
     if (pendingReviewCount > 0) {
       setPayrollLoading(true)
       const confirmed = await askForConfirmation({
@@ -1881,8 +1886,11 @@ function App() {
         message: `Còn ${pendingReviewCount} mục đi trễ/quên bấm/chưa rõ chưa được xác nhận.`,
         confirmLabel: 'Xuất Output 2',
       })
-      setPayrollLoading(false)
-      if (!confirmed) return
+      if (!confirmed) {
+        output2BusyRef.current = false
+        setPayrollLoading(false)
+        return
+      }
     }
     if (includeSavedData) {
       setPayrollLoading(true)
@@ -1898,23 +1906,27 @@ function App() {
         if (missing.length) {
           setOutput2BankMissing(missing)
           setOutput2BankAccounts(Object.fromEntries(missing.map((employee) => [employee.employee_code, ''])))
+          output2BusyRef.current = false
           setPayrollLoading(false)
           setOutput2ChoiceOpen(false)
           return
         }
+        // The busy lock is released below when this preflight fails.
       } catch (err) {
+        output2BusyRef.current = false
         setError(readAxiosError(err, 'Không kiểm tra được tài khoản ngân hàng trước khi xuất Output 2'))
         setPayrollLoading(false)
         return
       }
-      setPayrollLoading(false)
     }
     setOutput2ChoiceOpen(false)
     await exportOutput2File(includeSavedData)
+    output2BusyRef.current = false
+    setPayrollLoading(false)
   }
 
   async function confirmOutput2BankAccounts() {
-    if (!data || !output2BankMissing.length) return
+    if (!data || !output2BankMissing.length || output2BusyRef.current) return
     const accounts = output2BankMissing.map((employee) => ({
       employee_code: employee.employee_code,
       name: employee.name || '',
@@ -1925,6 +1937,7 @@ function App() {
       setError(`Còn ${unresolved.length} mã thiếu số tài khoản. Hãy nhập đủ 8–20 chữ số hoặc chọn “Xuất bản hiện tại”.`)
       return
     }
+    output2BusyRef.current = true
     setPayrollLoading(true)
     setError(null)
     try {
@@ -1944,18 +1957,28 @@ function App() {
       }
       setOutput2BankMissing([])
       setOutput2BankAccounts({})
-      setPayrollLoading(false)
       await exportOutput2File(true)
+      output2BusyRef.current = false
+      setPayrollLoading(false)
     } catch (err) {
+      output2BusyRef.current = false
       setPayrollLoading(false)
       setError(readAxiosError(err, 'Không lưu được số tài khoản ngân hàng'))
     }
   }
 
   async function exportOutput2WithMissingBankAccounts() {
+    if (!data || output2BusyRef.current) return
+    output2BusyRef.current = true
+    setPayrollLoading(true)
     setOutput2BankMissing([])
     setOutput2BankAccounts({})
-    await exportOutput2File(true)
+    try {
+      await exportOutput2File(true, true)
+    } finally {
+      output2BusyRef.current = false
+      setPayrollLoading(false)
+    }
   }
 
   async function saveCurrentToHistory() {
@@ -3918,16 +3941,16 @@ function App() {
               hồ sơ lương, thưởng và ghi chú đang lưu trên máy. Phạt NQ và ứng lương tháng này không tự điền.
             </p>
             <div className="export-choice-options">
-              <button type="button" className="export-choice-card" onClick={() => void runOutput2Export(true)}>
+              <button type="button" className="export-choice-card" disabled={payrollLoading} onClick={() => void runOutput2Export(true)}>
                 <strong>Có dữ liệu đã lưu</strong>
                 <span>Điền sẵn tên, mức lương, thưởng và ghi chú; vẫn để trống phạt NQ và ứng lương.</span>
               </button>
-              <button type="button" className="export-choice-card formula-only" onClick={() => void runOutput2Export(false)}>
+              <button type="button" className="export-choice-card formula-only" disabled={payrollLoading} onClick={() => void runOutput2Export(false)}>
                 <strong>Chỉ giữ công thức</strong>
                 <span>Để trống dữ liệu lương trên máy; chủ tự nhập vào file Excel.</span>
               </button>
             </div>
-            <button type="button" className="secondary-button export-choice-cancel" onClick={() => setOutput2ChoiceOpen(false)}>
+            <button type="button" className="secondary-button export-choice-cancel" disabled={payrollLoading} onClick={() => setOutput2ChoiceOpen(false)}>
               Hủy
             </button>
           </section>

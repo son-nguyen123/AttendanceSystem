@@ -57,6 +57,21 @@ class PayrollReviewOverride(BaseModel):
 class PayrollExportRequest(PayrollSessionRequest):
     review_overrides: list[PayrollReviewOverride] = Field(default_factory=list)
     include_saved_data: bool = True
+    allow_missing_bank_accounts: bool = False
+
+
+def _missing_bank_account_codes(preview: dict[str, Any]) -> list[str]:
+    """Return working employees whose bank account is still blank."""
+    missing_codes: list[str] = []
+    for employee in preview.get("employees", []):
+        try:
+            total_hours = float(employee.get("total_hours") or 0)
+        except (TypeError, ValueError):
+            total_hours = 0
+        employee_code = normalize_employee_code(employee.get("employee_code"))
+        if total_hours > 0 and employee_code and not str(employee.get("bank_account") or "").strip():
+            missing_codes.append(employee_code)
+    return missing_codes
 
 
 @router.get("/profile-sync-status")
@@ -143,6 +158,31 @@ def export_output_2(request: PayrollExportRequest, user: dict = Depends(require_
         source_path.parent,
         [item.model_dump(include=item.model_fields_set) for item in request.review_overrides],
     )
+    if request.include_saved_data and not request.allow_missing_bank_accounts:
+        preview = (
+            preview_factory2_payroll(
+                source_path,
+                review_overrides=review_overrides,
+                profile_codes=profile_codes,
+                factory=factory,
+            )
+            if factory == "factory2"
+            else preview_payroll(
+                source_path,
+                review_overrides=review_overrides,
+                profile_codes=profile_codes,
+                factory=factory,
+            )
+        )
+        missing_bank_codes = _missing_bank_account_codes(preview)
+        if missing_bank_codes:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Output 2 is blocked until missing bank accounts are confirmed.",
+                    "missing_codes": missing_bank_codes,
+                },
+            )
     if factory == "factory2":
         export_factory2_output2(
             source_path,
