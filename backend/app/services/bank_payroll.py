@@ -88,6 +88,8 @@ def scan_official_workbook(path: Path, factory: str) -> dict[str, Any]:
     # the employee rows are still discoverable instead of rejecting the file.
     formula_wb = load_workbook(path, data_only=False, keep_vba=keep_vba)
     employees: dict[str, dict[str, Any]] = {}
+    code_locations: dict[str, list[str]] = {}
+    visited_rows: set[tuple[int, int]] = set()
     month = year = None
     try:
         for sheet_index, values_ws in enumerate(values_wb.worksheets):
@@ -109,6 +111,10 @@ def scan_official_workbook(path: Path, factory: str) -> dict[str, Any]:
                 )
                 if not code:
                     continue
+                location = (sheet_index, result_row)
+                if location in visited_rows:
+                    continue
+                visited_rows.add(location)
                 name_col = fields.get("name", fields["code"] + 1)
                 name = str(
                     values_ws.cell(result_row, name_col).value
@@ -118,6 +124,7 @@ def scan_official_workbook(path: Path, factory: str) -> dict[str, Any]:
                 name = normalize_employee_name(name)
                 if not name:
                     name = normalize_employee_name(_find_employee_name(values_ws, result_row, fields))
+                code_locations.setdefault(code, []).append(f"'{values_ws.title}' dòng {result_row} ({name or 'Chưa có tên'})")
                 salary = _number(values_ws.cell(result_row, fields["final_salary"]).value)
                 calculated_salary = _calculate_salary(values_ws, result_row, fields)
                 # Excel may leave formula cells without cached results (or
@@ -142,6 +149,11 @@ def scan_official_workbook(path: Path, factory: str) -> dict[str, Any]:
     finally:
         values_wb.close()
         formula_wb.close()
+
+    duplicates = {code: locations for code, locations in code_locations.items() if len(locations) > 1}
+    if duplicates:
+        details = "; ".join(f"Mã {code}: {', '.join(locations)}" for code, locations in duplicates.items())
+        raise ValueError("Trùng mã nhân viên trong bảng lương. " + details + ". Hãy sửa file rồi quét lại; chưa thể xuất lương.")
 
     if not employees:
         raise ValueError("Không nhận ra danh sách lương trong file. Hãy chọn đúng bảng chính thức Output 2.")
@@ -218,6 +230,7 @@ def list_accounts(factory: str) -> dict[str, Any]:
 
 
 def save_accounts(factory: str, accounts: list[dict[str, Any]]) -> dict[str, Any]:
+    _reject_duplicate_employee_codes(accounts, "danh sách tài khoản")
     factory = _factory(factory)
     registry = _load_registry()
     updated = 0
@@ -403,39 +416,8 @@ def import_accounts_from_excel_salary(
     as a filter when it is present.
     """
     factory = _factory(factory)
-    detected_month, detected_year = detect_excel_salary_period(path)
-    month = detected_month or month
-    year = detected_year or year
-    if not 1 <= month <= 12 or year < 2000:
-        raise ValueError("Tháng hoặc năm lưu không hợp lệ.")
-
-    found: dict[str, dict[str, str]] = {}
-    keep_vba = path.suffix.lower() == ".xlsm"
-    workbook = load_workbook(path, data_only=True, keep_vba=keep_vba)
-    try:
-        for worksheet in workbook.worksheets:
-            header_row, columns = _excel_salary_columns(worksheet)
-            if header_row is None:
-                continue
-            for row in worksheet.iter_rows(min_row=header_row + 1, values_only=True):
-                if not row or max(columns.values()) >= len(row):
-                    continue
-                code = _employee_code(row[columns["code"]])
-                if not code or _normalize(code) in {"stt", "tong", "total"}:
-                    continue
-                account = normalize_account_number(re.sub(r"\D", "", str(row[columns["account"]] or "")))
-                if not account:
-                    continue
-                row_period = _period_from_text(row[columns["period"]]) if "period" in columns else (None, None)
-                if row_period != (None, None) and row_period != (month, year):
-                    continue
-                name = normalize_employee_name(row[columns.get("name", columns["code"])])
-                found.setdefault(code, {})[account] = name
-    finally:
-        workbook.close()
-
-    if not found:
-        raise ValueError("Không tìm thấy cột Mã Nhân Viên và Số TK trong file Excel lương cũ.")
+    month, year = _resolve_excel_salary_period(path, month, year)
+    found = _read_excel_salary_accounts(path, month, year)
 
     return _persist_imported_accounts(
         found,
@@ -446,6 +428,23 @@ def import_accounts_from_excel_salary(
         source_path=path,
         source_type="excel_salary",
     )
+
+
+def inspect_excel_salary_import(
+    path: Path,
+    factory: str,
+    month: int | None = None,
+    year: int | None = None,
+) -> dict[str, Any]:
+    """Inspect an old salary workbook without changing the account registry."""
+    factory = _factory(factory)
+    month, year = _resolve_excel_salary_period(path, month, year)
+    found = _read_excel_salary_accounts(path, month, year)
+    return {
+        "month": month,
+        "year": year,
+        "duplicate_accounts": _excel_salary_duplicate_accounts(found, factory),
+    }
 
 
 def detect_excel_salary_period(path: Path) -> tuple[int | None, int | None]:
@@ -489,6 +488,76 @@ def _excel_salary_columns(worksheet) -> tuple[int | None, dict[str, int]]:
             columns["period"] = period_column
         return row_index, columns
     return None, {}
+
+
+def _resolve_excel_salary_period(path: Path, month: int | None, year: int | None) -> tuple[int, int]:
+    detected_month, detected_year = detect_excel_salary_period(path)
+    resolved_month = detected_month or month
+    resolved_year = detected_year or year
+    if (
+        not resolved_month
+        or not resolved_year
+        or not 1 <= int(resolved_month) <= 12
+        or int(resolved_year) < 2000
+    ):
+        raise ValueError("Tháng hoặc năm lưu không hợp lệ.")
+    return int(resolved_month), int(resolved_year)
+
+
+def _read_excel_salary_accounts(path: Path, month: int, year: int) -> dict[str, dict[str, str]]:
+    found: dict[str, dict[str, str]] = {}
+    keep_vba = path.suffix.lower() == ".xlsm"
+    workbook = load_workbook(path, data_only=True, keep_vba=keep_vba)
+    try:
+        for worksheet in workbook.worksheets:
+            header_row, columns = _excel_salary_columns(worksheet)
+            if header_row is None:
+                continue
+            for row in worksheet.iter_rows(min_row=header_row + 1, values_only=True):
+                if not row or max(columns.values()) >= len(row):
+                    continue
+                code = _employee_code(row[columns["code"]])
+                if not code or _normalize(code) in {"stt", "tong", "total"}:
+                    continue
+                account = normalize_account_number(re.sub(r"\D", "", str(row[columns["account"]] or "")))
+                if not account:
+                    continue
+                row_period = _period_from_text(row[columns["period"]]) if "period" in columns else (None, None)
+                if row_period != (None, None) and row_period != (month, year):
+                    continue
+                name = normalize_employee_name(row[columns.get("name", columns["code"])])
+                found.setdefault(code, {})[account] = name
+    finally:
+        workbook.close()
+
+    if not found:
+        raise ValueError("Không tìm thấy cột Mã Nhân Viên và Số TK trong file Excel lương cũ.")
+    return found
+
+
+def _excel_salary_duplicate_accounts(
+    found: dict[str, dict[str, str]],
+    factory: str,
+) -> list[dict[str, Any]]:
+    registry = _load_registry()
+    by_account: dict[str, set[str]] = {}
+    for code, account_names in found.items():
+        for account in account_names:
+            by_account.setdefault(account, set()).add(code)
+
+    duplicates: list[dict[str, Any]] = []
+    for account, source_codes in sorted(by_account.items()):
+        saved_codes = set(_account_codes(registry, factory, account))
+        all_codes = sorted(source_codes | saved_codes, key=_code_sort)
+        if len(all_codes) < 2:
+            continue
+        duplicates.append({
+            "account_number": account,
+            "employee_codes": all_codes,
+            "file_employee_codes": sorted(source_codes, key=_code_sort),
+            "saved_employee_codes": sorted(saved_codes, key=_code_sort),
+        })
+    return duplicates
 
 
 def _duplicate_source_accounts(found: dict[str, dict[str, str]]) -> dict[str, list[str]]:
@@ -735,11 +804,25 @@ def _missing_reason(name: str, account: str) -> str:
     return "; ".join(reasons)
 
 
+def _reject_duplicate_employee_codes(rows: list[dict[str, Any]], context: str) -> None:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for row in rows:
+        code = _employee_code(row.get("employee_code"))
+        if code and code in seen:
+            duplicates.add(code)
+        seen.add(code)
+    if duplicates:
+        raise ValueError(f"Trùng mã nhân viên trong {context}: {', '.join(sorted(duplicates))}. Hãy sửa mã trước khi tiếp tục.")
+
+
 def _prepare_bank_export_rows(
     snapshot: dict[str, Any],
     account_overrides: list[dict[str, Any]] | None,
     missing_account_mode: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    _reject_duplicate_employee_codes(snapshot["employees"], "bảng lương")
+    _reject_duplicate_employee_codes(account_overrides or [], "danh sách nhập")
     factory = snapshot["factory"]
     registry = _load_registry()
     override_rows = {
@@ -1090,11 +1173,9 @@ def _build_bank_workbook(
             cell.border = border
 
     content = f"T{month}/{year}" if month and year else ""
-    total = 0
     for index, employee in enumerate(employees, start=1):
         row_number = index + 3
         salary = _number(employee.get("salary")) or 0
-        total += salary
         values = [
             index,
             _employee_code(employee.get("employee_code")),
@@ -1121,7 +1202,8 @@ def _build_bank_workbook(
     total_label = worksheet.cell(row=total_row, column=1, value="TỔNG")
     total_label.font = Font(name="Arial", size=10, bold=True)
     total_label.alignment = Alignment(horizontal="center", vertical="center")
-    total_amount = worksheet.cell(row=total_row, column=5, value=total)
+    total_formula = f"=SUM(E4:E{total_row - 1})" if employees else "=0"
+    total_amount = worksheet.cell(row=total_row, column=5, value=total_formula)
     total_amount.font = Font(name="Arial", size=10, bold=True)
     total_amount.alignment = Alignment(horizontal="right", vertical="center")
     total_amount.number_format = '#,##0'
@@ -1129,6 +1211,9 @@ def _build_bank_workbook(
         worksheet.cell(row=total_row, column=column).border = border
 
     worksheet.freeze_panes = "A4"
+    workbook.calculation.calcMode = "auto"
+    workbook.calculation.fullCalcOnLoad = True
+    workbook.calculation.forceFullCalc = True
     workbook.save(path)
 
 

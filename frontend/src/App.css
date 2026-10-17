@@ -1218,6 +1218,7 @@
 .bank-directory-legend i { width: 10px; height: 10px; border-radius: 50%; background: #fff; border: 1px solid #cbd6df; }
 .bank-directory-legend i.missing { background: #f4c95d; border-color: #e3b33a; }
 .bank-directory-legend i.complete { background: #48b77b; border-color: #309a62; }
+.bank-directory-legend i.missing-name { background: #e85d75; border-color: #c93652; }
 .bank-directory-legend i.inactive { background: #a8b2bc; border-color: #8e9aa5; }
 .bank-directory-legend i.warehouse { background: #fff; }
 .bank-directory-table-wrap { overflow-x: auto; }
@@ -1234,6 +1235,10 @@
 .bank-directory-active-complete:hover td { background: #e2f5e9; }
 .bank-directory-inactive td { background: #f1f3f5; color: #8996a3; }
 .bank-directory-inactive:hover td { background: #e8ecef; }
+.bank-directory-missing-name td,
+.bank-missing-name-row td { background: #fff0f2; color: #9f1f30; }
+.bank-directory-missing-name:hover td,
+.bank-missing-name-row:hover td { background: #ffe3e8; }
 
 .employee-card-choice-dialog { width: min(640px, calc(100vw - 32px)); }
 .employee-card-choice-dialog > p:not(.export-choice-kicker) { margin: 0 0 18px; color: #6c7f90; line-height: 1.55; }
@@ -1580,6 +1585,13 @@
 
 .bank-inline-alert strong { flex: 0 0 auto; font-size: 11px; }
 .bank-inline-alert span { font-size: 11px; }
+.bank-inline-alert-danger {
+  grid-column: 1 / -1;
+  margin-top: -2px;
+  border: 1px solid #efb1bb;
+  color: #9f1f30;
+  background: #fff0f2;
+}
 
 .bank-metrics {
   display: grid;
@@ -1655,6 +1667,25 @@
 .bank-row-status.complete { color: #176a50; background: #dff3e9; }
 .bank-row-status.inactive { color: #687789; background: #e5e9ee; }
 .bank-row-status.conflict { color: #a51d2d; background: #ffe3e6; }
+
+.bank-table td:last-child {
+  width: 190px;
+  min-width: 190px;
+}
+
+.bank-table td:last-child .bank-row-status {
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+.bank-table input[aria-invalid="true"] {
+  border-color: #d34858;
+  background: #fff5f6;
+  box-shadow: 0 0 0 2px rgb(211 72 88 / 10%);
+}
+.bank-row-status.missing-name { color: #a51d2d; background: #ffe0e6; }
 .bank-conflict-row td { background: #fff5f6; }
 .bank-conflict-row:hover td { background: #ffedef !important; }
 .bank-conflict-row input { border-color: #dc4c5d; color: #9f1f30; background: #fff; }
@@ -2761,6 +2792,42 @@ button:disabled {
 .app-toast.error .app-toast-icon { background: #d34858; }
 .app-toast-message { font-size: 12px; font-weight: 650; line-height: 1.4; }
 
+.app-toast-message {
+  max-height: min(240px, 40vh);
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+.employee-code-field {
+  position: relative;
+  min-width: 0;
+  padding-bottom: 24px;
+}
+
+.employee-code-field .employee-code-hint {
+  position: absolute;
+  bottom: 2px;
+  left: 0;
+  right: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 20px;
+  color: #64748b;
+}
+
+.employee-code-field.has-conflict input {
+  border-color: #d97706;
+  background: #fffbeb;
+  box-shadow: 0 0 0 2px rgb(217 119 6 / 10%);
+}
+
+.employee-code-field.has-conflict .employee-code-hint {
+  color: #92400e;
+}
+
 .app-toast-close {
   width: 28px;
   min-height: 28px;
@@ -2975,6 +3042,10 @@ button:disabled {
 
 .employee-registry-form {
   min-width: 0;
+}
+
+.employee-registry-form .form-grid {
+  align-items: start;
 }
 
 .payroll-tools {

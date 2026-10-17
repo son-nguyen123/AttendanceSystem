@@ -31,6 +31,7 @@ STORAGE_DIR = Path(__file__).resolve().parents[2] / "storage"
 class PayrollSaveRequest(BaseModel):
     factory: str = "factory1"
     employee_code: str
+    original_employee_code: str = ""
     name: str = ""
     start_work_note: str = ""
     monthly_salary: float | None = None
@@ -118,6 +119,12 @@ def save_payroll(request: PayrollSaveRequest, user: dict = Depends(require_owner
     employee_code = normalize_employee_code(request.employee_code)
     if not employee_code:
         raise HTTPException(status_code=400, detail="Mã nhân viên không được để trống")
+
+    original_code = normalize_employee_code(request.original_employee_code)
+    existing = load_payroll_data(request.factory).get(employee_code)
+    if existing is not None and original_code != employee_code:
+        name = str(existing.get("name") or "Chưa có tên")
+        raise HTTPException(status_code=409, detail=f"Mã {employee_code} đã thuộc về {name}. Chọn hồ sơ đó để sửa hoặc nhập mã mới; dữ liệu chưa được ghi đè.")
 
     entry = PayrollEntry(
         name=request.name.strip(),

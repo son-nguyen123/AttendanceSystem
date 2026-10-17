@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import axios from 'axios'
+import { bankAccountConflictCodes } from './bankAccountConflicts'
 import './App.css'
 
 const API_BASE = 'http://127.0.0.1:8000/api'
@@ -1788,7 +1789,7 @@ function App() {
     setError(null)
     setMessage(null)
     try {
-      await axios.post(`${API_BASE}/payroll/save`, payrollPayload(form, factoryMode))
+      await axios.post(`${API_BASE}/payroll/save`, { ...payrollPayload(form, factoryMode), original_employee_code: selectedCode })
       await loadEmployeeRegistry(form.employee_code)
       await refreshPayroll(undefined, activeView === 'payroll')
       await loadAttendanceOverview(attendanceOverviewYear)
@@ -4734,6 +4735,13 @@ type SalaryImportConflict = {
   reason?: string
 }
 
+type SalaryDuplicateAccount = {
+  account_number: string
+  employee_codes: string[]
+  file_employee_codes?: string[]
+  saved_employee_codes?: string[]
+}
+
 type BankAccountOverview = {
   factory: FactoryMode
   accounts: BankAccountDirectoryRow[]
@@ -4743,18 +4751,12 @@ type BankAccountOverview = {
   duplicate_accounts?: Array<{ account_number: string; employee_codes: string[] }>
 }
 
-function bankAccountConflictCodes(
-  employeeCode: string,
-  accountNumber: string,
-  rows: Array<{ employee_code: string; account_number: string }>,
-  warehouseRows: Array<{ employee_code: string; account_number: string }> = [],
-) {
-  const account = accountNumber.replace(/\D/g, '')
-  if (!account) return []
-  return [...new Set([...rows, ...warehouseRows]
-    .filter((item) => item.employee_code !== employeeCode && item.account_number.replace(/\D/g, '') === account)
-    .map((item) => item.employee_code))]
-    .sort((left, right) => Number(left) - Number(right) || left.localeCompare(right))
+function bankRowMissingName(row: { name?: string | null }) {
+  return !String(row.name ?? '').trim()
+}
+
+function bankRowHasAccountButMissingName(row: { name?: string | null; account_number?: string | null }) {
+  return bankRowMissingName(row) && Boolean(String(row.account_number ?? '').trim())
 }
 
 type BankScan = {
@@ -4785,6 +4787,7 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
   const [salaryConflictOpen, setSalaryConflictOpen] = useState(false)
   const [salaryConflicts, setSalaryConflicts] = useState<SalaryImportConflict[]>([])
   const [salaryConflictChoices, setSalaryConflictChoices] = useState<Record<string, string>>({})
+  const [salaryDuplicateAccounts, setSalaryDuplicateAccounts] = useState<SalaryDuplicateAccount[]>([])
   const [salaryFileDragging, setSalaryFileDragging] = useState(false)
   const [accountOverview, setAccountOverview] = useState<BankAccountOverview | null>(null)
   const [accountSearch, setAccountSearch] = useState('')
@@ -4792,11 +4795,15 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
   const [savedAccountNumbers, setSavedAccountNumbers] = useState<Record<string, string>>({})
   const [bankFileDragging, setBankFileDragging] = useState(false)
   const activeCodes = scan ? new Set(rows.map((row) => row.employee_code)) : null
-  const missingInfoRows = rows.filter((row) => !row.name.trim() || !row.account_number.trim())
+  const missingInfoRows = rows.filter((row) => bankRowMissingName(row) || !row.account_number.trim())
   const missing = missingInfoRows.length
-  const conflictCount = rows.filter((row) => row.conflict_accounts?.length || row.conflict_codes?.length).length
+  const checkedRows = rows.map((row) => ({
+    ...row,
+    conflict_codes: bankAccountConflictCodes(row.employee_code, row.account_number, rows, accountOverview?.accounts ?? []),
+  }))
+  const conflictCount = checkedRows.filter((row) => row.conflict_accounts?.length || row.conflict_codes.length).length
   const total = rows.reduce((sum, row) => sum + Number(row.salary || 0), 0)
-  const visibleRows = rows.filter((row) => {
+  const visibleRows = checkedRows.filter((row) => {
     const keyword = search.trim().toLowerCase()
     return !keyword || row.employee_code.toLowerCase().includes(keyword) || row.name.toLowerCase().includes(keyword)
   })
@@ -4856,6 +4863,8 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
     setBusy('scan')
     setError('')
     setNotice('')
+    setScan(null)
+    setRows([])
     const form = new FormData()
     form.append('factory', factory)
     form.append('file', file)
@@ -4874,6 +4883,10 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
   }
 
   async function save() {
+    if (conflictCount) {
+      setError('Có số tài khoản trùng hoặc chưa được xác định. Hãy sửa các dòng được đánh dấu trước khi lưu.')
+      return
+    }
     setBusy('save')
     setError('')
     try {
@@ -4917,6 +4930,7 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
 
   async function selectSalaryFile(selected: File | null) {
     setSalaryFile(selected)
+    setSalaryDuplicateAccounts([])
     if (!selected) return
     if (!/\.(xls|xlsx|xlsm)$/i.test(selected.name)) {
       setError('Chỉ nhận file Excel .xls, .xlsx hoặc .xlsm.')
@@ -4926,10 +4940,16 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
     setError('')
     const form = new FormData()
     form.append('file', selected)
+    form.append('factory', factory)
     try {
-      const response = await axios.post<{ month: number | null; year: number | null }>(`${API_BASE}/bank/inspect-excel-salary`, form)
+      const response = await axios.post<{
+        month: number | null
+        year: number | null
+        duplicate_accounts?: SalaryDuplicateAccount[]
+      }>(`${API_BASE}/bank/inspect-excel-salary`, form)
       if (response.data.month) setSalaryMonth(String(response.data.month))
       if (response.data.year) setSalaryYear(String(response.data.year))
+      setSalaryDuplicateAccounts(response.data.duplicate_accounts || [])
     } catch (err) {
       setError(readAxiosError(err, 'Không đọc được tháng/năm trong Excel lương cũ'))
     }
@@ -5056,6 +5076,11 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
 
   async function exportExcel(destination: 'drive' | 'local') {
     if (!scan) return
+    if (conflictCount) {
+      setExportChoiceOpen(false)
+      setError('Chưa thể xuất lương: có số tài khoản trùng hoặc chưa được xác định. Hãy sửa các dòng được đánh dấu.')
+      return
+    }
     setExportChoiceOpen(false)
     setBusy('export')
     setError('')
@@ -5265,6 +5290,14 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
           {busy === 'salary' ? 'Đang nhập Excel...' : 'Nhập Excel lương cũ'}
         </button>
       </div>
+      {salaryDuplicateAccounts.length > 0 && (
+        <div className="bank-inline-alert bank-inline-alert-danger" role="alert">
+          <strong>Cảnh báo trùng số tài khoản</strong>
+          <span>
+            Chưa nhập các dòng trùng. {salaryDuplicateAccounts.map((item) => `${item.account_number}: mã ${item.employee_codes.join(', ')}`).join(' · ')}
+          </span>
+        </div>
+      )}
 
       <div className="bank-section-tabs bank-section-tabs-lowered" role="tablist" aria-label="Khu vực ngân hàng">
         <button type="button" role="tab" aria-selected={bankTab === 'transfer'} className={bankTab === 'transfer' ? 'active' : ''} onClick={() => setBankTab('transfer')}>
@@ -5305,10 +5338,13 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
               <thead><tr><th>STT</th><th>Mã nhân viên</th><th>Họ và tên</th><th>Số tài khoản</th><th>Tiền lương</th><th>Trạng thái</th></tr></thead>
               <tbody>
                 {visibleRows.map((row, index) => (
-                  <tr key={row.employee_code} className={row.conflict_accounts?.length || row.conflict_codes?.length ? 'bank-conflict-row' : ''}>
+                  <tr
+                    key={row.employee_code}
+                    className={`${row.conflict_accounts?.length || row.conflict_codes?.length ? 'bank-conflict-row ' : ''}${bankRowHasAccountButMissingName(row) ? 'bank-missing-name-row' : ''}`}
+                  >
                     <td>{index + 1}</td><td><strong>{row.employee_code}</strong></td><td>{row.name}</td>
                     <td>
-                      <input inputMode="numeric" disabled={row.is_fixed} value={row.account_number} placeholder="Nhập số tài khoản" onChange={(event) => updateTransferAccount(row.employee_code, event.target.value)} />
+                      <input inputMode="numeric" disabled={row.is_fixed} value={row.account_number} placeholder="Nhập số tài khoản" aria-label={`Số tài khoản mã ${row.employee_code}`} aria-invalid={Boolean(row.conflict_codes.length)} onChange={(event) => updateTransferAccount(row.employee_code, event.target.value)} />
                       {Boolean(row.conflict_accounts?.length) && (
                         <div className="bank-conflict-note">
                           <span>Mã này đang có {row.conflict_accounts?.length} số tài khoản. Xóa mã sai:</span>
@@ -5334,11 +5370,6 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
                           </div>
                         </div>
                       )}
-                      {Boolean(row.conflict_codes?.length) && (
-                        <div className="bank-conflict-note">
-                          <span>Số tài khoản này đang trùng với mã: {row.conflict_codes?.join(', ')}. Hãy kiểm tra lại.</span>
-                        </div>
-                      )}
                     </td>
                     <td className="bank-money">
                       {row.salary_editable ? (
@@ -5354,9 +5385,11 @@ function BankPayrollView({ factory, onConfirm }: { factory: FactoryMode; onConfi
                       ) : `${Number(row.salary).toLocaleString('vi-VN')} đ`}
                     </td>
                     <td>
-                      <span className={`bank-row-status${row.conflict_accounts?.length || row.conflict_codes?.length ? ' conflict' : isUnsavedAccount(row) ? ' draft' : row.account_number ? ' complete' : ''}`}>
+                      <span title={row.conflict_codes.length ? `Số tài khoản đang trùng với mã: ${row.conflict_codes.join(', ')}. Kiểm tra và sửa số tài khoản trước khi lưu hoặc xuất.` : undefined} className={`bank-row-status${row.conflict_accounts?.length || row.conflict_codes?.length ? ' conflict' : bankRowHasAccountButMissingName(row) ? ' missing-name' : isUnsavedAccount(row) ? ' draft' : row.account_number ? ' complete' : ''}`}>
                         {row.conflict_accounts?.length || row.conflict_codes?.length
-                          ? 'Trùng tài khoản'
+                          ? row.conflict_codes.length ? `Trùng TK · mã ${row.conflict_codes.join(', ')}` : 'Cần chọn tài khoản'
+                          : bankRowHasAccountButMissingName(row)
+                            ? 'Thiếu họ tên'
                           : isUnsavedAccount(row)
                             ? 'Vừa nhập'
                             : row.account_number
@@ -5458,9 +5491,10 @@ function BankAccountDirectory({
       </div>
       <div className="bank-directory-legend" aria-live="polite">
         {!activeCodes ? <span><i className="warehouse" /> Chưa quét: kho tài khoản nền trắng</span> : <>
-          <span><i className="missing" /> Vàng: có làm tháng này, chưa có tài khoản</span>
-          <span><i className="complete" /> Xanh: có làm và đã có tài khoản</span>
-          <span><i className="inactive" /> Xám: không làm tháng này</span>
+           <span><i className="missing" /> Vàng: có làm tháng này, chưa có tài khoản</span>
+           <span><i className="complete" /> Xanh: có làm và đã có tài khoản</span>
+           <span><i className="missing-name" /> Đỏ: có tài khoản nhưng thiếu họ tên</span>
+           <span><i className="inactive" /> Xám: không làm tháng này</span>
         </>}
       </div>
       {loading ? (
@@ -5472,14 +5506,15 @@ function BankAccountDirectory({
           <table className="bank-table bank-directory-table">
             <thead><tr><th>STT</th><th>Mã nhân viên</th><th>Họ và tên</th><th>Số tài khoản</th><th>Trạng thái</th></tr></thead>
             <tbody>
-              {rows.map((row, index) => (
-                (() => {
-                  const draftAccount = draftAccounts[row.employee_code] ?? row.account_number
-                  const liveConflictCodes = bankAccountConflictCodes(row.employee_code, draftAccount, draftRows)
-                  return (
+                {rows.map((row, index) => (
+                  (() => {
+                    const draftAccount = draftAccounts[row.employee_code] ?? row.account_number
+                    const liveConflictCodes = bankAccountConflictCodes(row.employee_code, draftAccount, draftRows)
+                    const missingNameWithAccount = bankRowHasAccountButMissingName({ ...row, account_number: draftAccount })
+                    return (
                 <tr
                   key={row.employee_code}
-                  className={`${liveConflictCodes.length || row.conflict_codes?.length ? 'bank-conflict-row ' : ''}${activeCodes
+                  className={`${liveConflictCodes.length ? 'bank-conflict-row ' : ''}${missingNameWithAccount ? 'bank-directory-missing-name ' : ''}${activeCodes
                     ? activeCodes.has(row.employee_code)
                       ? row.account_number ? 'bank-directory-active-complete' : 'bank-directory-active-missing'
                       : 'bank-directory-inactive'
@@ -5495,6 +5530,7 @@ function BankAccountDirectory({
                       placeholder="Chưa nhập"
                       onChange={(event) => setDraftAccounts((current) => ({ ...current, [row.employee_code]: event.target.value.replace(/\D/g, '') }))}
                       aria-label={`Số tài khoản mã ${row.employee_code}`}
+                      aria-invalid={liveConflictCodes.length > 0}
                     />
                     <button
                       type="button"
@@ -5506,9 +5542,10 @@ function BankAccountDirectory({
                     </button>
                   </td>
                   <td>
-                    <span className={`bank-row-status${liveConflictCodes.length || row.conflict_codes?.length ? ' conflict' : activeCodes && !activeCodes.has(row.employee_code) ? ' inactive' : activeCodes && draftAccount ? ' complete' : ''}`}>
-                      {liveConflictCodes.length || row.conflict_codes?.length
-                        ? `Trùng số với mã ${(liveConflictCodes.length ? liveConflictCodes : row.conflict_codes ?? []).join(', ')}`
+                    <span title={liveConflictCodes.length ? `Số tài khoản đang trùng với mã: ${liveConflictCodes.join(', ')}. Hãy kiểm tra lại trước khi lưu.` : undefined} className={`bank-row-status${liveConflictCodes.length ? ' conflict' : missingNameWithAccount ? ' missing-name' : activeCodes && !activeCodes.has(row.employee_code) ? ' inactive' : activeCodes && draftAccount ? ' complete' : ''}`}>
+                      {liveConflictCodes.length
+                        ? `Trùng TK · mã ${liveConflictCodes.join(', ')}`
+                        : missingNameWithAccount ? 'Thiếu họ tên'
                         : !activeCodes ? 'Trong kho' : !activeCodes.has(row.employee_code) ? 'Không làm tháng này' : row.account_number ? 'Có thể nhận lương' : 'Cần bổ sung'}
                     </span>
                   </td>
@@ -6079,6 +6116,9 @@ function EmployeeRegistryView({
   })
   const enteredCount = filteredEmployees.filter(isEmployeeProfileEntered).length
   const missingCount = filteredEmployees.length - enteredCount
+  const duplicateEmployee = form.employee_code.trim() !== selectedCode.trim()
+    ? employees.find((employee) => employee.employee_code.trim() === form.employee_code.trim())
+    : undefined
 
   return (
     <section className="employee-registry-layout">
@@ -6129,7 +6169,13 @@ function EmployeeRegistryView({
           <span>{form.employee_code || 'Mã mới'}</span>
         </div>
         <div className="form-grid">
-          <Input label="Mã nhân viên" value={form.employee_code} onChange={(value) => onFormChange({ ...form, employee_code: value })} />
+          <label className={`field employee-code-field${duplicateEmployee ? ' has-conflict' : ''}`}>
+            <span>Mã nhân viên</span>
+            <input value={form.employee_code} aria-invalid={Boolean(duplicateEmployee)} aria-describedby="employee-code-hint" onChange={(event) => onFormChange({ ...form, employee_code: event.target.value })} />
+            <span id="employee-code-hint" className="employee-code-hint" role={duplicateEmployee ? 'alert' : undefined} title={duplicateEmployee ? `Mã đã thuộc về ${duplicateEmployee.name || 'nhân viên chưa có tên'}. Chọn hồ sơ đó để sửa.` : undefined}>
+              {duplicateEmployee ? `⚠ Mã đã có: ${duplicateEmployee.name || 'Chưa có tên'}. Hãy dùng mã khác.` : 'Mỗi nhân viên dùng một mã riêng trong xưởng.'}
+            </span>
+          </label>
           <Input label="Tên nhân viên" value={form.name} onChange={(value) => onFormChange({ ...form, name: value })} />
           <Input label="Bắt đầu làm" value={form.start_work_note} onChange={(value) => onFormChange({ ...form, start_work_note: value })} />
           <Input label="Mức lương tháng" value={form.monthly_salary} onChange={(value) => onFormChange({ ...form, monthly_salary: value })} type="number" />
@@ -6141,7 +6187,7 @@ function EmployeeRegistryView({
           </label>
         </div>
         <div className="payroll-actions">
-          <button type="button" disabled={loading || !form.employee_code.trim()} onClick={onSave}>
+          <button type="button" disabled={loading || !form.employee_code.trim() || Boolean(duplicateEmployee)} onClick={onSave}>
             Lưu thông tin nhân viên
           </button>
         </div>
@@ -8580,6 +8626,7 @@ function payrollPayload(form: PayrollForm, factory: FactoryMode) {
   return {
     factory,
     employee_code: form.employee_code,
+    original_employee_code: form.employee_code.trim(),
     name: form.name,
     start_work_note: form.start_work_note,
     monthly_salary: parseOptionalNumber(calculatedMonthlySalaryValue(form)),

@@ -28,7 +28,7 @@ class BankPayrollExcelTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_dir:
             output = Path(temporary_dir) / "bank-payroll.xlsx"
             _build_bank_workbook(output, employees, 6, 2026)
-            workbook = load_workbook(output, data_only=True)
+            workbook = load_workbook(output, data_only=False)
 
         worksheet = workbook["BangLuongNganHang"]
         self.assertEqual(worksheet["A2"].value, " THIỆN TRÍ THÁNG 6/2026")
@@ -43,7 +43,40 @@ class BankPayrollExcelTests(unittest.TestCase):
         self.assertEqual(worksheet["B5"].value, "0012")
         self.assertEqual(worksheet["D5"].value, "0012345678")
         self.assertEqual(worksheet["A6"].value, "TỔNG")
-        self.assertEqual(worksheet["E6"].value, 5330000)
+        self.assertEqual(worksheet["E6"].value, "=SUM(E4:E5)")
+        self.assertEqual(workbook.calculation.calcMode, "auto")
+        self.assertTrue(workbook.calculation.fullCalcOnLoad)
+        self.assertTrue(workbook.calculation.forceFullCalc)
+        workbook.close()
+
+    def test_empty_export_total_does_not_reference_itself(self) -> None:
+        with TemporaryDirectory() as temporary_dir:
+            output = Path(temporary_dir) / "empty.xlsx"
+            _build_bank_workbook(output, [], 7, 2026)
+            workbook = load_workbook(output, data_only=False)
+            self.assertEqual(workbook.active["E4"].value, "=0")
+            workbook.close()
+
+    def test_duplicate_codes_block_export_even_with_blank_accounts(self) -> None:
+        snapshot = {"factory": "factory2", "employees": [
+            {"employee_code": "1412", "name": "A", "salary": 100},
+            {"employee_code": " 1412 ", "name": "B", "salary": 200},
+        ]}
+        with self.assertRaisesRegex(ValueError, "Trùng mã nhân viên.*1412"):
+            bank_payroll._prepare_bank_export_rows(snapshot, [], "leave_blank")
+
+    def test_duplicate_override_codes_block_export(self) -> None:
+        snapshot = {"factory": "factory2", "employees": []}
+        with self.assertRaisesRegex(ValueError, "Trùng mã nhân viên.*1412"):
+            bank_payroll._prepare_bank_export_rows(snapshot, [
+                {"employee_code": "1412"}, {"employee_code": "1412"},
+            ], "leave_blank")
+
+    def test_duplicate_account_rows_are_rejected_before_saving(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Trùng mã nhân viên.*1412"):
+            bank_payroll.save_accounts("factory2", [
+                {"employee_code": "1412"}, {"employee_code": "1412"},
+            ])
 
     def test_missing_accounts_can_be_omitted_or_left_blank(self) -> None:
         with TemporaryDirectory() as temporary_dir:
@@ -132,6 +165,9 @@ class BankPayrollExcelTests(unittest.TestCase):
                     self.assertEqual(review_sheet["A4"].value, "1500")
                     self.assertEqual(review_sheet["D4"].value, "Thiếu họ tên; Thiếu số tài khoản")
                     self.assertEqual(review_sheet.max_column, 4)
+                    formula_book = load_workbook(files["salary_path"], data_only=False)
+                    self.assertEqual(formula_book.active["E6"].value, "=SUM(E4:E5)")
+                    formula_book.close()
                 finally:
                     salary_book.close()
                     review_book.close()

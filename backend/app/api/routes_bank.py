@@ -13,10 +13,10 @@ from app.services.local_exports import try_save_local_export_copy
 from app.services.bank_payroll import (
     backup_registry_to_drive,
     bank_status,
-    detect_excel_salary_period,
     detect_word_period,
     export_bank_excel_files,
     export_bank_excel_local,
+    inspect_excel_salary_import,
     import_accounts_from_excel_salary,
     import_accounts_from_word,
     list_accounts,
@@ -171,6 +171,7 @@ def import_excel_salary(
 @router.post("/inspect-excel-salary")
 def inspect_excel_salary(
     file: UploadFile = File(...),
+    factory: str = Form("factory1"),
     user: dict = Depends(require_owner),
 ):
     suffix = Path(file.filename or "").suffix.lower()
@@ -182,8 +183,7 @@ def inspect_excel_salary(
         shutil.copyfileobj(file.file, output)
     target = ensure_openpyxl_workbook(target, target.with_suffix(".xlsx"))
     try:
-        month, year = detect_excel_salary_period(target)
-        return {"month": month, "year": year}
+        return inspect_excel_salary_import(target, factory)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Không đọc được tháng/năm trong Excel lương: {exc}") from exc
     finally:

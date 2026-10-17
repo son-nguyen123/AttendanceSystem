@@ -200,6 +200,52 @@ class BankAccountMappingLayoutTests(unittest.TestCase):
 
 
 class OldSalaryExcelImportTests(unittest.TestCase):
+    def test_inspect_reports_duplicate_accounts_without_saving(self) -> None:
+        with TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            source = root / "salary-old.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet["A2"] = "THIỆN TRÍ THÁNG 6/2026"
+            sheet.append([])
+            sheet.append(["STT", "Mã Nhân Viên", "HỌ TÊN", "SỐ TK", "SỐ TIỀN", "NỘI DUNG"])
+            sheet.append([1, 1006, "Alice", "5601884980", 1000000, "T6/2026"])
+            sheet.append([2, 1007, "Bob", "5601884980", 1000000, "T6/2026"])
+            workbook.save(source)
+            workbook.close()
+
+            original_registry_path = bank_payroll.REGISTRY_PATH
+            bank_payroll.REGISTRY_PATH = root / "bank_accounts.json"
+            bank_payroll.REGISTRY_PATH.write_text(
+                json.dumps({
+                    "factory1:1008": {
+                        "factory": "factory1",
+                        "employee_code": "1008",
+                        "account_number": "5601884981",
+                    },
+                }),
+                encoding="utf-8",
+            )
+            try:
+                result = bank_payroll.inspect_excel_salary_import(source, "factory1")
+                registry = bank_payroll._load_registry()
+            finally:
+                bank_payroll.REGISTRY_PATH = original_registry_path
+
+            self.assertEqual(result["month"], 6)
+            self.assertEqual(result["year"], 2026)
+            self.assertEqual(
+                result["duplicate_accounts"],
+                [{
+                    "account_number": "5601884980",
+                    "employee_codes": ["1006", "1007"],
+                    "file_employee_codes": ["1006", "1007"],
+                    "saved_employee_codes": [],
+                }],
+            )
+            self.assertNotIn("factory1:1006", registry)
+            self.assertNotIn("factory1:1007", registry)
+
     def test_import_reads_salary_template_and_ignores_other_month_rows(self) -> None:
         with TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
