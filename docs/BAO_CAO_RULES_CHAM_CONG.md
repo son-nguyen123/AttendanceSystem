@@ -46,6 +46,7 @@ Vì vậy hệ thống cần một bộ quy tắc cố định để xử lý nh
 | Làm đủ ca chiều | Nếu có giờ vào chiều và làm đến 17:00 thì tính 4 giờ | Ca chiều là block chuẩn 4 giờ | Trước đó các lần bấm sau 17:00 có thể làm ca chiều vượt quá 4 giờ |
 | Chiều nối tối | Nếu làm liên tục từ chiều qua tối thì tính 4 giờ chiều cộng phần giờ tối | Phù hợp trường hợp làm nối ca | Nếu không có rule này, phần sau 17:00/18:00 có thể bị bỏ hoặc tính sai |
 | Ra chiều rồi vào tối | Nếu có giờ ra chiều và vào lại ca tối, hệ thống tách chiều và tối | Phân biệt làm thêm chiều với ca tối riêng | Trước đó một chuỗi giờ 13:00, 17:20, 17:50, 22:00 rất dễ bị tính thành một ca liền mạch |
+| Ra chiều sớm rồi vào tối rõ ràng | Sau khi bỏ bấm trùng: có vào chiều, ra trong 13:00-16:29, ngay sau đó vào tối 17:40-18:15 và chỉ có một lần ra tối 21:30-22:30 | Tách đúng giờ chiều thực tế với ca tối, thay vì coi là làm liền mạch | Trước đó mốc ra chiều sớm như 16:01 có thể bị cộng nhầm thành chiều nối tối; chuỗi có mốc xen giữa vẫn không tự suy đoán |
 | Không đủ cặp giờ | Nếu không đủ dữ liệu vào/ra thì không tự tính công và đưa vào danh sách cần kiểm tra | Tránh tự suy đoán khi thiếu dữ liệu | Trước đó nếu cố tính, kết quả có thể sai lương hoặc sai công |
 
 ## 6. Rules làm tròn giờ công

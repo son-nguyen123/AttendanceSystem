@@ -25,6 +25,38 @@ def test_early_afternoon_checkout_is_not_reported_as_missing_punch() -> None:
     assert not any("quên bấm công" in message for message in result.manual_checks)
 
 
+def test_early_afternoon_checkout_then_clear_evening_restart_counts_separate_shifts() -> None:
+    result = calculate_day(
+        ["07:20", "07:21", "07:26", "11:30", "12:54", "12:55", "12:56", "16:01", "17:57", "22:02"]
+    )
+
+    assert result.work_value == 11
+    assert result.missing_count is None
+    assert result.late_minutes is None
+    assert result.manual_checks == []
+
+
+def test_early_afternoon_checkout_then_clear_evening_restart_handles_earlier_checkout() -> None:
+    result = calculate_day(["07:20", "11:30", "12:55", "14:00", "17:57", "22:02"])
+
+    assert result.work_value == 9
+    assert result.missing_count is None
+    assert result.manual_checks == []
+
+
+def test_early_checkout_rule_requires_no_extra_significant_evening_punch() -> None:
+    result = calculate_day(["07:20", "11:30", "12:55", "16:01", "17:57", "20:00", "22:02"])
+
+    assert result.work_value == 13
+
+
+def test_continuous_afternoon_evening_shift_remains_unchanged() -> None:
+    result = calculate_day(["07:20", "11:30", "12:55", "22:02"])
+
+    assert result.work_value == 13
+    assert result.manual_checks == []
+
+
 def test_duplicate_afternoon_entry_does_not_count_as_checkout() -> None:
     result = calculate_day(["07:22", "11:31", "12:54", "12:55"])
 

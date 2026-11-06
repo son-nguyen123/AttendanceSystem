@@ -30,6 +30,12 @@ AFTERNOON_EXTRA_END_NORMAL = 17 * 60 + 39
 AFTERNOON_EXTRA_SUSPICIOUS_START = 17 * 60 + 40
 AFTERNOON_CHECKOUT_CLUSTER_START = 16 * 60 + 55
 AFTERNOON_CHECKOUT_CLUSTER_END = 17 * 60 + 39
+# A checkout before the normal end-of-afternoon window can still be a real
+# checkout when it is followed by one unambiguous evening restart and exit.
+# Keep this before 16:30 so the established late-afternoon split rules retain
+# ownership of their existing boundary range.
+EARLY_AFTERNOON_RESTART_CHECKOUT_MIN = AFTERNOON_START
+EARLY_AFTERNOON_RESTART_CHECKOUT_MAX = 16 * 60 + 29
 EVENING_RESTART_MIN = 17 * 60 + 40
 EVENING_RESTART_MAX = 18 * 60 + 15
 EVENING_OUT_MIN = 21 * 60 + 30
@@ -754,15 +760,22 @@ def _afternoon_evening_split_pair(times: list[int]) -> tuple[int, int] | None:
 
 
 def _clear_afternoon_evening_restart_pair(times: list[int]) -> tuple[int, int] | None:
-    """Recognize a clean afternoon checkout and early evening restart.
+    """Recognize an unambiguous afternoon checkout and evening restart.
 
-    Exactly two raw marks must exist in the end-of-afternoon cluster.  Three
-    or more marks remain under the habitual repeated-punch rule because they
-    are inherently ambiguous.  Evening work is only inferred when a clear
-    final checkout is also present.
+    There are two deliberately narrow shapes:
+    - an early afternoon checkout directly followed by an evening restart and
+      one final evening checkout; or
+    - exactly two raw marks in the established end-of-afternoon cluster.
+
+    Extra significant marks between the early checkout, restart, and final
+    checkout remain ambiguous and are left to the existing rules.
     """
     if not _has_afternoon_in(times) or not _has_evening_out(times):
         return None
+
+    early_checkout_pair = _clear_early_afternoon_evening_restart_pair(times)
+    if early_checkout_pair is not None:
+        return early_checkout_pair
 
     cluster = [
         value
@@ -777,6 +790,41 @@ def _clear_afternoon_evening_restart_pair(times: list[int]) -> tuple[int, int] |
         return None
 
     return checkout, restart
+
+
+def _clear_early_afternoon_evening_restart_pair(times: list[int]) -> tuple[int, int] | None:
+    """Return a clear early checkout/restart pair without guessing mid-shift marks.
+
+    The fingerprint is intentionally strict after duplicate punches are
+    collapsed: an afternoon entry, a checkout before 16:30, its immediately
+    following restart in the evening window, and then exactly one evening
+    checkout.  This prevents an early exit plus later evening work from being
+    mistaken for one continuous afternoon-evening shift while preserving days
+    with any extra or incomplete marks.
+    """
+    significant_times = _collapse_duplicate_punches(times)
+    afternoon_entries = _afternoon_in_times(significant_times)
+    if not afternoon_entries:
+        return None
+
+    for index, checkout in enumerate(significant_times[:-2]):
+        if not (EARLY_AFTERNOON_RESTART_CHECKOUT_MIN <= checkout <= EARLY_AFTERNOON_RESTART_CHECKOUT_MAX):
+            continue
+        if not any(entry < checkout for entry in afternoon_entries):
+            continue
+
+        restart = significant_times[index + 1]
+        final_checkout = significant_times[index + 2]
+        if index + 2 != len(significant_times) - 1:
+            continue
+        if not (EVENING_RESTART_MIN <= restart <= EVENING_RESTART_MAX):
+            continue
+        if not (EVENING_OUT_MIN <= final_checkout <= EVENING_OUT_MAX):
+            continue
+
+        return checkout, restart
+
+    return None
 
 
 def _extra_afternoon_evening_split_pair(times: list[int]) -> tuple[int, int] | None:
